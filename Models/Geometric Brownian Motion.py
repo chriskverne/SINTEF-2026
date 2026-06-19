@@ -20,12 +20,14 @@ We include various risk measures to analyze the distribution P(S_t)
 3) Threshold based measure: Finds P(S_t < k) where k represents a threshold. (e.g. what is probability stock will be worth less than 100$ given a GBM model)
 
 Todo:
-Once P(S_t) is loaded instead of sampling from it to estimate F(S_t) with a precision O(1/epsilon) we rely on QAE
+- Once P(S_t) is loaded instead of sampling from it to estimate F(S_t) with a precision O(1/epsilon) we rely on QAE
 We evalaute all states and utilize QAE to represent the desired / undesired solution in a single qubit
 However we are currently just returning qml.probs(q) instead of using QAE. For now this is fine but to run on quantum hardware we would have to implement both
 For now this should be a fine example and the rest should follow the real logic. Generally this program will allow us to model GBM through a quantum comptuer and show how it solves the task
 
-Additionally the idea is to compare it to classical methods using standard sampling 
+- idea is to compare it to classical methods using standard sampling 
+
+- Add VAR risk measure along others
 """
 
 class GeometricBrownianMotion:
