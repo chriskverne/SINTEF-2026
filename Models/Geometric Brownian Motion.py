@@ -1,51 +1,7 @@
 import numpy as np
 import pennylane as qml
 import matplotlib.pyplot as plt
-
-class RiskMeasures:
-    @staticmethod 
-    def maximum(gbm):
-        # Allocate gbm.m risk factor qubits + 1 risk measure qubit
-        dev = qml.device('default.qubit', wires=gbm.m + 1)
-        rm_qubit = gbm.m
-        
-        @qml.qnode(dev)
-        def circuit():
-            gbm.state_preparation_gates(wires=range(gbm.m))
-                
-            # 'wires' takes control wires first, followed by the target wire at the end.
-            qml.MultiControlledX(
-                wires=list(range(gbm.m)) + [rm_qubit], 
-                control_values=[1] * gbm.m
-            )
-            
-            # 3. Measure ONLY the Risk Measure qubit
-            return qml.probs(wires=rm_qubit)
-            
-        return circuit()
-
-    @staticmethod 
-    def minimum(gbm):
-        """
-        Calculates P(S_min) by checking if all paths are 'down' (|00...0>).
-        """
-        dev = qml.device('default.qubit', wires=gbm.m + 1)
-        rm_qubit = gbm.m
-        
-        @qml.qnode(dev)
-        def circuit():
-            # 1. State Prep (Gate D) - Reusing the GBM class method!
-            gbm.state_preparation_gates(wires=range(gbm.m))
-                
-            # Flips rm_qubit ONLY if all control_wires are exactly '0'
-            qml.MultiControlledX(
-                wires=list(range(gbm.m)) + [rm_qubit], 
-                control_values=[0] * gbm.m
-            )
-            
-            return qml.probs(wires=rm_qubit)
-            
-        return circuit()
+    
 
 class GeometricBrownianMotion:
     def __init__(self, S0, mu, sigma, dt, m):
@@ -89,8 +45,173 @@ class GeometricBrownianMotion:
             return qml.state()
         
         return preparation()
+    
+    def threshold_risk_measure(self, threshold_price):
+        """
+        Calculates P(X_t < k) where k represents the threshold price.
+        """
+        # compute d= 0, d=1, d=2,...,d=m prices classically
+        threshold_d = -1 
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            if price < threshold_price:
+                threshold_d = i
+                
+        if threshold_d == -1:
+            return np.array([1.0, 0.0])
 
-    def plot_prices(self, state):
+        # allocate wires
+        rf_wires = list(range(self.m))
+        num_count = int(np.ceil(np.log2(self.m + 1)))
+        count_wires = list(range(self.m, self.m + num_count))
+        num_state = threshold_d + 1
+        state_wires = list(range(self.m + num_count, self.m + num_count + num_state))
+        rm_qubit = self.m + num_count + num_state
+        total_wires = rm_qubit + 1
+        
+        dev = qml.device('default.qubit', wires=total_wires)
+        
+        # increment matrix (C) for counter
+        inc_matrix = np.roll(np.eye(2**num_count), 1, axis=0)
+
+        @qml.qnode(dev)
+        def circuit():
+            # state prep
+            self.state_preparation_gates(wires=rf_wires)
+
+            # counting (C) control wire [rf] is prepended to the target wires [count_wires]
+            for rf in rf_wires:
+                qml.ControlledQubitUnitary(inc_matrix, wires=[rf] + count_wires)
+
+            # checking (J) for each target threshold value flip respective state qubit if there is a match
+            for j in range(num_state):
+                j_bin = [int(b) for b in format(j, f'0{num_count}b')]
+                qml.MultiControlledX(
+                    wires=count_wires + [state_wires[j]],
+                    control_values=j_bin
+                )
+
+            # flip rm_qubit to 1 if ANY state qubit is 1.
+            qml.PauliX(wires=rm_qubit)
+            qml.MultiControlledX(
+                wires=state_wires + [rm_qubit],
+                control_values=[0] * num_state
+            )
+
+            return qml.probs(wires=rm_qubit)
+
+        return circuit()
+    
+    def threshold_risk_measure_efficient(self, threshold_price):
+        """P(S_T < threshold_price) loaded onto a single rm_qubit."""
+        # classically locate the largest #ups whose price is still below threshold
+        threshold_d = -1
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            if price < threshold_price:
+                threshold_d = i
+        if threshold_d == -1:
+            return np.array([1.0, 0.0])
+
+        rf_wires = list(range(self.m))
+        num_count = int(np.ceil(np.log2(self.m + 1)))
+        count_wires = list(range(self.m, self.m + num_count))
+        rm_qubit = self.m + num_count
+        total_wires = rm_qubit + 1
+
+        dev = qml.device('default.qubit', wires=total_wires)
+        inc_matrix = np.roll(np.eye(2**num_count), 1, axis=0)
+
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=rf_wires)
+
+            # accumulate the Hamming weight (# of 'up' moves) into the counter
+            for rf in rf_wires:
+                qml.ControlledQubitUnitary(inc_matrix, wires=[rf] + count_wires)
+
+            # flip rm_qubit directly whenever the counter holds a below-threshold value.
+            # exactly one of these fires per basis state, so no OR / scratch register needed.
+            for j in range(threshold_d + 1):
+                j_bin = [int(b) for b in format(j, f'0{num_count}b')]
+                qml.MultiControlledX(wires=count_wires + [rm_qubit], control_values=j_bin)
+
+            return qml.probs(wires=rm_qubit)
+
+        return circuit()
+    
+    def maximum_risk_measure(self):
+        """
+        Calculates P(S_max) by checking if all paths are 'up' (|11...1>).
+        """
+        dev = qml.device('default.qubit', wires=self.m + 1)
+        rm_qubit = self.m
+        
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=range(self.m))
+                
+            # flips risk measure qubit if all control wires are 1
+            qml.MultiControlledX(
+                wires=list(range(self.m)) + [rm_qubit], 
+                control_values=[1] * self.m
+            )
+            
+            return qml.probs(wires=rm_qubit)
+            
+        return circuit()
+
+    def minimum_risk_measure(self):
+        """
+        Calculates P(S_min) by checking if all paths are 'down' (|00...0>).
+        """
+        dev = qml.device('default.qubit', wires=self.m + 1)
+        rm_qubit = self.m
+        
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=range(self.m))
+                
+            # flips risk measure qubit if all control wires are 0
+            qml.MultiControlledX(
+                wires=list(range(self.m)) + [rm_qubit], 
+                control_values=[0] * self.m
+            )
+            
+            return qml.probs(wires=rm_qubit)
+            
+        return circuit()
+
+    
+    def verify_threshold(self, threshold_price):
+        """
+        Classically verifies the probability and partial expectation 
+        for prices below the threshold using the raw quantum state.
+        """
+        state = self.create_quantum_state()
+        probs = np.abs(state)**2 
+        outcomes = np.zeros(self.m + 1)
+        
+        # Aggregate probabilities based on the number of 'up' moves (j)
+        for i in range(len(probs)):
+            outcomes[bin(i).count('1')] += probs[i]
+
+        prob_sum = 0.0
+
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            
+            if price < threshold_price:
+                prob_sum += outcomes[i]
+                
+        print(f"--- Classical Verification ---")
+        print(f"Threshold Price: ${threshold_price:.2f}")
+        print(f"Sum p(x)   [Probability]        : {prob_sum:.6%}")
+
+        return prob_sum
+
+    def plot_prices(self):
+        state = self.create_quantum_state()
         probs = np.abs(state)**2 
         outcomes = np.zeros(self.m + 1)
         for i in range(len(probs)):
@@ -99,25 +220,44 @@ class GeometricBrownianMotion:
         plt.figure(figsize=(10, 6))
         plt.bar(np.arange(self.m + 1), outcomes, color='#1f77b4', edgecolor='black', alpha=0.8)
         plt.xticks(np.arange(self.m + 1), [f'${self.S0 * self.u**i * self.d**(self.m - i):.2f}' for i in range(self.m + 1)], rotation=45)
-        plt.xlabel(f'Terminal Price after {self.m} steps')
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_state(self):
+        state = self.create_quantum_state()
+        probs = np.abs(state)**2 
+        outcomes = np.zeros(self.m + 1)
+        for i in range(len(probs)): 
+            outcomes[bin(i).count('1')] += probs[i]
+
+        plt.bar(np.arange(self.m + 1), outcomes, color='#1f77b4', edgecolor='black', alpha=0.8)
+        plt.xticks(np.arange(self.m + 1), [f'{bin(i).count("1")} ups, {self.m - bin(i).count("1")} downs' for i in range(self.m + 1)], rotation=45)
         plt.ylabel('Probability')
-        plt.title('Quantum Simulated Price Distribution')
         plt.tight_layout()
         plt.show()
 
 std = 0.20
 expected_return = 0.08
 step_size = 1.0
-m_qubits = 10 
-GBM = GeometricBrownianMotion(S0=100, mu=expected_return, sigma=std, dt=step_size, m=m_qubits)
+m_qubits = 10
+GBM = GeometricBrownianMotion(S0=12, mu=expected_return, sigma=std, dt=step_size, m=m_qubits)
 
 # Get full state distribution
 get_state = GBM.create_quantum_state()
-GBM.plot_prices(get_state)
+# GBM.plot_state()
+# GBM.plot_prices()
 
 # --- Evaluate Extreme Risk Measures ---
-max_probs = RiskMeasures.maximum(GBM)
-print(f"P(S_max) [All 'Up' moves]   : {max_probs[1]:.6%}")
+max_prob = GBM.maximum_risk_measure()
+print(f"P(S_max) [All 'Up' moves]   : {max_prob[1]:.6%}")
 
-min_probs = RiskMeasures.minimum(GBM)
+min_probs = GBM.minimum_risk_measure()
 print(f"P(S_min) [All 'Down' moves] : {min_probs[1]:.6%}")
+
+# threshold_risk = GBM.threshold_risk_measure(threshold_price=150)
+# print(f"P(S_T < $130)                : {threshold_risk[1]:.6%}")
+
+efficient_threshold_risk = GBM.threshold_risk_measure_efficient(threshold_price=150)
+print(f"P(S_T < $130) (Efficient)    : {efficient_threshold_risk[1]:.6%}")
+
+verified_threshold = GBM.verify_threshold(threshold_price=150)
