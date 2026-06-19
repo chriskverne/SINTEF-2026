@@ -276,7 +276,7 @@ std = 0.20
 expected_return = 0.08
 step_size = 1.0
 m_qubits = 10
-GBM = GeometricBrownianMotion(S0=12, mu=expected_return, sigma=std, dt=step_size, m=m_qubits)
+GBM = GeometricBrownianMotion(S0=100, mu=expected_return, sigma=std, dt=step_size, m=m_qubits)
 
 # --- Plot GBM State ---
 get_state = GBM.create_quantum_state()
@@ -291,10 +291,10 @@ min_probs = GBM.minimum_risk_measure()
 print(f"P(S_min) [All 'Down' moves] : {min_probs[1]:.6%}")
 
 # --- Evaluate Threshold Risk Measures ---
-threshold_risk = GBM.threshold_risk_measure(threshold_price=150)
-print(f"P(S_T < $130)                : {threshold_risk[1]:.6%}")
+# threshold_risk = GBM.threshold_risk_measure(threshold_price=130)
+# print(f"P(S_T < $130)                : {threshold_risk[1]:.6%}")
 
-efficient_threshold_risk = GBM.threshold_risk_measure_efficient(threshold_price=150)
+efficient_threshold_risk = GBM.threshold_risk_measure_efficient(threshold_price=130)
 print(f"P(S_T < $130) (Efficient)    : {efficient_threshold_risk[1]:.6%}")
 
-verified_threshold = GBM.verify_threshold(threshold_price=150)
+verified_threshold = GBM.verify_threshold(threshold_price=130)
