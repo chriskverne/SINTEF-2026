@@ -1,0 +1,281 @@
+import numpy as np
+import pennylane as qml
+import matplotlib.pyplot as plt
+
+"""
+Class used for modelling Structural Credit Risk
+We model the assets value A_t through Binomial Trees through GBM (See GBM Class)
+
+We represent both the equity risk factor problem and the "Merton model" (in the threshold based meaure)
+This will give us the chance of a Default: Asset Value (A) < Liabilities (D)
+A is modeled through GBM, D is given 
+"""
+
+class StructuralCreditRisk:
+    def __init__(self, S0, mu, sigma, dt, m):
+        """
+        S0: Initial price
+        mu: expected return (drift)
+        sigma: standard deviation (volatility)
+        dt: time step size
+        m: number of time steps (qubits)
+        """
+        self.S0 = S0
+        self.mu = mu
+        self.sigma = sigma
+        self.dt = dt
+        self.m = m
+
+        # up/down factors + probabilities + quantum rotation angle
+        self.u = np.exp(self.sigma * np.sqrt(self.dt))
+        self.d = 1.0 / self.u
+        self.q = (self.u * np.exp(self.mu * self.dt) - 1) / (self.u**2 - 1)
+
+        # q = sin^2(theta/2) -> theta = 2 * arcsin(sqrt(q))
+        self.theta = 2 * np.arcsin(np.sqrt(self.q))
+
+    def state_preparation_gates(self, wires):
+        """
+        Creates binomial tree in |psi>
+        """
+        for i in wires:
+            qml.RY(self.theta, wires=i)
+
+    def create_quantum_state(self):
+        """
+        returns quantum state representing the price distribution at T = m*dt
+        """
+        dev = qml.device('default.qubit', wires=self.m)
+        
+        @qml.qnode(dev)
+        def preparation():
+            self.state_preparation_gates(wires=range(self.m))
+            return qml.state()
+        
+        return preparation()
+    
+    def threshold_risk_measure(self, threshold_price):
+        """
+        Calculates P(X_t < k) where k represents the threshold price.
+        Uses m + ceil(log2(m+1)) + (k+1) + 1 qubits total
+        Where k represents number of up moves that doesn't break threshold (based on j)
+        """
+
+        # compute d= 0, d=1, d=2,...,d=m prices classically
+        threshold_d = -1 
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            if price < threshold_price:
+                threshold_d = i
+                
+        if threshold_d == -1:
+            return np.array([1.0, 0.0])
+
+        # allocate wires
+        rf_wires = list(range(self.m))
+        num_count = int(np.ceil(np.log2(self.m + 1)))
+        count_wires = list(range(self.m, self.m + num_count))
+        num_state = threshold_d + 1
+        state_wires = list(range(self.m + num_count, self.m + num_count + num_state))
+        rm_qubit = self.m + num_count + num_state
+        total_wires = rm_qubit + 1
+        
+        dev = qml.device('default.qubit', wires=total_wires)
+        
+        # increment matrix (C) for counter
+        inc_matrix = np.roll(np.eye(2**num_count), 1, axis=0)
+
+        @qml.qnode(dev)
+        def circuit():
+            # state prep
+            self.state_preparation_gates(wires=rf_wires)
+
+            # counting (C) control wire [rf] is prepended to the target wires [count_wires]
+            for rf in rf_wires:
+                qml.ControlledQubitUnitary(inc_matrix, wires=[rf] + count_wires)
+
+            # checking (J) for each target threshold value flip respective state qubit if there is a match
+            for j in range(num_state):
+                j_bin = [int(b) for b in format(j, f'0{num_count}b')]
+                qml.MultiControlledX(
+                    wires=count_wires + [state_wires[j]],
+                    control_values=j_bin
+                )
+
+            # flip rm_qubit to 1 if ANY state qubit is 1.
+            qml.PauliX(wires=rm_qubit)
+            qml.MultiControlledX(
+                wires=state_wires + [rm_qubit],
+                control_values=[0] * num_state
+            )
+
+            return qml.probs(wires=rm_qubit)
+
+        return circuit()
+    
+    def threshold_risk_measure_efficient(self, threshold_price):
+        """
+        P(S_T < threshold_price) loaded onto a single rm_qubit.
+        Uses m + ceil(log2(m+1)) + 1 qubits total
+        """
+        # classically locate the largest #ups whose price is still below threshold
+        threshold_d = -1
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            if price < threshold_price:
+                threshold_d = i
+        if threshold_d == -1:
+            return np.array([1.0, 0.0])
+
+        rf_wires = list(range(self.m))
+        num_count = int(np.ceil(np.log2(self.m + 1)))
+        count_wires = list(range(self.m, self.m + num_count))
+        rm_qubit = self.m + num_count
+        total_wires = rm_qubit + 1
+
+        dev = qml.device('default.qubit', wires=total_wires)
+        inc_matrix = np.roll(np.eye(2**num_count), 1, axis=0)
+
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=rf_wires)
+
+            # accumulate the Hamming weight (# of 'up' moves) into the counter
+            for rf in rf_wires:
+                qml.ControlledQubitUnitary(inc_matrix, wires=[rf] + count_wires)
+
+            # flip rm_qubit directly whenever the counter holds a below-threshold value.
+            # exactly one of these fires per basis state, so no OR / scratch register needed.
+            for j in range(threshold_d + 1):
+                j_bin = [int(b) for b in format(j, f'0{num_count}b')]
+                qml.MultiControlledX(wires=count_wires + [rm_qubit], control_values=j_bin)
+
+            return qml.probs(wires=rm_qubit)
+
+        return circuit()
+    
+    def maximum_risk_measure(self):
+        """
+        Calculates P(S_max) by checking if all paths are 'up' (|11...1>).
+        """
+        dev = qml.device('default.qubit', wires=self.m + 1)
+        rm_qubit = self.m
+        
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=range(self.m))
+                
+            # flips risk measure qubit if all control wires are 1
+            qml.MultiControlledX(
+                wires=list(range(self.m)) + [rm_qubit], 
+                control_values=[1] * self.m
+            )
+            
+            return qml.probs(wires=rm_qubit)
+            
+        return circuit()
+
+    def minimum_risk_measure(self):
+        """
+        Calculates P(S_min) by checking if all paths are 'down' (|00...0>).
+        """
+        dev = qml.device('default.qubit', wires=self.m + 1)
+        rm_qubit = self.m
+        
+        @qml.qnode(dev)
+        def circuit():
+            self.state_preparation_gates(wires=range(self.m))
+                
+            # flips risk measure qubit if all control wires are 0
+            qml.MultiControlledX(
+                wires=list(range(self.m)) + [rm_qubit], 
+                control_values=[0] * self.m
+            )
+            
+            return qml.probs(wires=rm_qubit)
+            
+        return circuit()
+
+    
+    def verify_threshold(self, threshold_price):
+        """
+        Classically verifies the probability and partial expectation 
+        for prices below the threshold using the raw quantum state.
+        """
+        state = self.create_quantum_state()
+        probs = np.abs(state)**2 
+        outcomes = np.zeros(self.m + 1)
+        
+        # Aggregate probabilities based on the number of 'up' moves (j)
+        for i in range(len(probs)):
+            outcomes[bin(i).count('1')] += probs[i]
+
+        prob_sum = 0.0
+
+        for i in range(self.m + 1):
+            price = self.S0 * (self.u**i) * (self.d**(self.m - i))
+            
+            if price < threshold_price:
+                prob_sum += outcomes[i]
+                
+        print(f"--- Classical Verification ---")
+        print(f"Threshold Price: ${threshold_price:.2f}")
+        print(f"Sum p(x)   [Probability]        : {prob_sum:.6%}")
+
+        return prob_sum
+
+    def plot_prices(self):
+        state = self.create_quantum_state()
+        probs = np.abs(state)**2 
+        outcomes = np.zeros(self.m + 1)
+        for i in range(len(probs)):
+            outcomes[bin(i).count('1')] += probs[i]
+
+        plt.figure(figsize=(10, 6))
+        plt.bar(np.arange(self.m + 1), outcomes, color='#1f77b4', edgecolor='black', alpha=0.8)
+        plt.xticks(np.arange(self.m + 1), [f'${self.S0 * self.u**i * self.d**(self.m - i):.2f}' for i in range(self.m + 1)], rotation=45)
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_state(self):
+        state = self.create_quantum_state()
+        probs = np.abs(state)**2 
+        outcomes = np.zeros(self.m + 1)
+        for i in range(len(probs)): 
+            outcomes[bin(i).count('1')] += probs[i]
+
+        plt.bar(np.arange(self.m + 1), outcomes, color='#1f77b4', edgecolor='black', alpha=0.8)
+        plt.xticks(np.arange(self.m + 1), [f'{bin(i).count("1")} ups, {self.m - bin(i).count("1")} downs' for i in range(self.m + 1)], rotation=45)
+        plt.ylabel('Probability')
+        plt.tight_layout()
+        plt.show()
+
+
+
+################################################ Tests ############################################
+std = 0.20
+expected_return = 0.08
+step_size = 1.0
+m_qubits = 10
+SCR = StructuralCreditRisk(S0=100, mu=expected_return, sigma=std, dt=step_size, m=m_qubits)
+
+# --- Plot SCRf State ---
+get_state = SCR.create_quantum_state()
+SCR.plot_state()
+SCR.plot_prices()
+
+# --- Evaluate Extreme Risk Measures ---
+max_prob = SCR.maximum_risk_measure()
+print(f"P(S_max) [All 'Up' moves]   : {max_prob[1]:.6%}")
+
+min_probs = SCR.minimum_risk_measure()
+print(f"P(S_min) [All 'Down' moves] : {min_probs[1]:.6%}")
+
+# --- Evaluate Threshold Risk Measures ---
+# threshold_risk = SCR.threshold_risk_measure(threshold_price=130)
+# print(f"P(S_T < $130)                : {threshold_risk[1]:.6%}")
+
+efficient_threshold_risk = SCR.threshold_risk_measure_efficient(threshold_price=130)
+print(f"P(S_T < $130) (Efficient)    : {efficient_threshold_risk[1]:.6%}")
+
+verified_threshold = SCR.verify_threshold(threshold_price=130)
