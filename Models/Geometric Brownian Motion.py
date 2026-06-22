@@ -214,7 +214,6 @@ class GeometricBrownianMotion:
             return qml.probs(wires=rm_qubit)
             
         return circuit()
-
     
     def verify_threshold(self, threshold_price):
         """
