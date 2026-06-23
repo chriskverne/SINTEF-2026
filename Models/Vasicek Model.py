@@ -94,18 +94,18 @@ def classical_verification(model):
 
 
 if __name__ == "__main__":
-    m=2
-    model = VasicekInterestModel(m)
-    state_wires = [0, 1, 2]
-    rf_pairs = [[3 + 2 * t, 4 + 2 * t] for t in range(m)]
-    model.plot_state(state_wires, rf_pairs)
+    # m=2
+    # model = VasicekInterestModel(m)
+    # state_wires = [0, 1, 2]
+    # rf_pairs = [[3 + 2 * t, 4 + 2 * t] for t in range(m)]
+    # model.plot_state(state_wires, rf_pairs)
 
-    for m in (1, 2, 3, 4, 8):
+    for m in (1, 2, 3, 4):
         model = VasicekInterestModel(m)
         state_wires = [0, 1, 2]
         rf_pairs = [[3 + 2 * t, 4 + 2 * t] for t in range(m)]
         dev = qml.device('default.qubit', wires=3 + 2 * m)
-
+        model.plot_state(state_wires, rf_pairs)
         @qml.qnode(dev)
         def circ():
             model.state_preparation_gates(state_wires, rf_pairs)

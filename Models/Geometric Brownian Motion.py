@@ -263,8 +263,10 @@ class GeometricBrownianMotion:
             outcomes[bin(i).count('1')] += probs[i]
 
         plt.bar(np.arange(self.m + 1), outcomes, color='#1f77b4', edgecolor='black', alpha=0.8)
-        plt.xticks(np.arange(self.m + 1), [f'{bin(i).count("1")} ups, {self.m - bin(i).count("1")} downs' for i in range(self.m + 1)], rotation=45)
-        plt.ylabel('Probability')
+        plt.xticks(
+            np.arange(self.m + 1), 
+            [f'{i} ups, {self.m - i} downs' for i in range(self.m + 1)], 
+            rotation=45)
         plt.tight_layout()
         plt.show()
 
