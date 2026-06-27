@@ -5,8 +5,11 @@ import matplotlib.pyplot as plt
 # ==========================================
 # 1. Setup & Classical Data Generation
 # ==========================================
-n_qubits = 8
+n_qubits = 5
+layers = 5
 n_states = 2 ** n_qubits  # 16 possible states (0 to 15)
+epochs = 500
+
 dev = qml.device("default.qubit", wires=n_qubits)
 
 # Let's generate 1000 raw samples of historical data (X)
@@ -68,17 +71,15 @@ def cost(weights):
     loss_var = (q_var - var_target) ** 2
     
     # Weighting them equally for now
-    return 0.95*loss_mean + 0.05*loss_var
+    return 0.70*loss_mean + 0.3 *loss_var
 
 # ==========================================
 # 4. Training Loop (Adam Optimizer)
 # ==========================================
-layers = 3
 # Initialize random weights: (layers, n_qubits, 2 parameters per qubit)
 weights = np.random.normal(0, np.pi, (layers, n_qubits, 2), requires_grad=True)
 
 opt = qml.AdamOptimizer(stepsize=0.1)
-epochs = 2000
 
 print("\nStarting Training...")
 for i in range(epochs):
