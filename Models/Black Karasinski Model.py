@@ -17,7 +17,7 @@ class BlackKarasinskiModel:
             ln_r = np.log(self.theta[0])
             for i in range(n_steps):
                 prices[i][j] = np.exp(ln_r)
-                ln_r = ln_r + self.k * (np.log(self.theta[i]) - ln_r)*self.dt + np.random.normal(0, scale=self.var) * self.dt
+                ln_r = ln_r + self.k * (np.log(self.theta[i]) - ln_r)*self.dt + np.random.normal(0, 1) * self.var * np.sqrt(self.dt)
 
         return prices
     
@@ -29,7 +29,7 @@ class BlackKarasinskiModel:
         for j in range(n_paths):
             plt.plot(x, prices[:, j], alpha=0.7, label=f'Path {j+1}')
 
-        plt.axhline(self.theta[0], color='black', linestyle='--', linewidth=1, label='θ (long-run mean)')
+        # plt.axhline(self.theta[0], color='black', linestyle='--', linewidth=1, label='θ (long-run mean)')
         plt.xlabel('Time step')
         plt.ylabel('Short rate')
         plt.title('Black-Karasinski Simulated Paths')
@@ -40,23 +40,188 @@ class BlackKarasinskiModel:
         # we will start with assuming theta and kappa are constant
         # here delta x = sigma sqrt(3t)
 
+        # the probability depends on the distnace from the center which I havent coded properly.
+
+        tree = np.zeros((num_steps, 2*num_steps + 1))
+
         for i in range(num_steps):
-            p_up = 1/6 + (self.k**2 * i**2 * self.dt**2 - self.k*self.dt)/2
-            p_mid = 2/3 - self.k**2 * i**2 * self.dt**2
-            p_down = 1/6 + (self.k**2 * i**2 * self.dt**2 + self.k*self.dt)/2
-            print(f"Step {i}: p_up={p_up:.4f}, p_mid={p_mid:.4f}, p_down={p_down:.4f}")
+            # Num(vertices) = 2t + 1
+            for j in range(-i, i+1): #starts at {-1, 0 1} then {-2, -1, 0, 1, 2}, and so forth
+                p_up = 1/6 + (self.k**2 * j**2 * self.dt**2 - self.k * j * self.dt) / 2
+                p_mid = 2/3 - (self.k**2 * j**2 * self.dt**2)
+                p_down = 1/6 + (self.k**2 * j**2 * self.dt**2 + self.k * j * self.dt) / 2
+                if p_up < 0 or p_up > 1 or p_mid < 0 or p_mid > 1 or p_down < 0 or p_down > 1:
+                    print(f"WARNING: Invalid probabilities at step {i}, node {j}: p_up={p_up}, p_mid={p_mid}, p_down={p_down}")
+                val = j * self.var * np.sqrt(3 * self.dt)
+                tree[i][j] = val
+                
+                print(f"  Node j={j:2d}: p_up={p_up:.4f}, p_mid={p_mid:.4f}, p_down={p_down:.4f}")
 
-        return 1
+        return tree
+    
+    def construct_trinomial_tree_changing_mean(self, num_steps=3):
+        tree = np.zeros((num_steps, 2*num_steps + 1))
 
-    def construct_binomial_tree(self):
+        # use theta = {t0: r0, t1: r1, t2: r2, ...} to change the mean at each step
+        for i in range(num_steps):
+            for j in range(-i, i+1):
+                p_up = 1/6 + (self.k**2 * j**2 * self.dt**2 - self.k * j * self.dt) / 2
+                p_mid = 2/3 - (self.k**2 * j**2 * self.dt**2)
+                p_down = 1/6 + (self.k**2 * j**2 * self.dt**2 + self.k * j * self.dt) / 2
+                
+                log_rate = np.log(self.theta[i]) + j * self.var * np.sqrt(3 * self.dt)
+                tree[i][j] = np.exp(log_rate)
+
+        return tree
+    
+    def plot_trinomial_tree_changing_mean(self, num_steps=10):
+        # Fetch the rate grid
+        tree = self.construct_trinomial_tree_changing_mean(num_steps=num_steps)
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        branch_colors = {1: 'seagreen', 0: 'gray', -1: 'indianred'}
+
+        for i in range(num_steps):
+            for j in range(-i, i + 1):
+                current_rate = tree[i][j]
+
+                # Draw edges to the next step's up/mid/down children
+                if i < num_steps - 1:
+                    for dj in (1, 0, -1):
+                        next_rate = tree[i + 1][j + dj]
+                        
+                        # CRITICAL FIX: Plot (time, rate) instead of (time, node index)
+                        ax.plot([i, i + 1], [current_rate, next_rate],
+                                color=branch_colors[dj], alpha=0.6, linewidth=1.2, zorder=1)
+
+                # Draw the vertex
+                ax.scatter(i, current_rate, color='steelblue', s=80, zorder=3, edgecolor='white')
+                
+                # Annotate the rates (decluttered for larger trees)
+                if num_steps <= 5 or j % 2 == 0: 
+                    ax.annotate(f"{current_rate:.3f}", (i, current_rate), textcoords="offset points",
+                                xytext=(0, 8), ha='center', fontsize=8, zorder=4)
+
+        # Plot the target mean (theta) as a dashed black line to show the tree following it
+        target_means = [self.theta[i] for i in range(num_steps)]
+        ax.plot(range(num_steps), target_means, color='black', linestyle='--', linewidth=2, label='Target Mean (θ)', zorder=0)
+
+        ax.set_xlabel('Time step')
+        ax.set_ylabel('Interest Rate (Real Value)') # The Y-axis is now the actual rate!
+        ax.set_title('Black-Karasinski Trinomial Tree (Shifting Mean)')
+        ax.set_xticks(range(num_steps))
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.show()
+
+    
+    def plot_trinomial_tree(self, num_steps=3):
+        tree = self.construct_trinomial_tree(num_steps=num_steps)
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+        branch_colors = {1: 'seagreen', 0: 'gray', -1: 'indianred'}
+
+        for i in range(num_steps):
+            for j in range(-i, i + 1):
+                val = tree[i][j]
+                rate = self.theta * np.exp(val)
+
+                # edges to next step's up/mid/down children
+                if i < num_steps - 1:
+                    for dj in (1, 0, -1):
+                        ax.plot([i, i + 1], [j, j + dj],
+                                color=branch_colors[dj], alpha=0.6, linewidth=1.2, zorder=1)
+
+                # vertex + price label
+                ax.scatter(i, j, color='steelblue', s=220, zorder=3, edgecolor='white')
+                ax.annotate(f"{rate:.4f}", (i, j), textcoords="offset points",
+                            xytext=(0, 12), ha='center', fontsize=8, zorder=4)
+
+        ax.set_xlabel('Time step')
+        ax.set_ylabel('Node index (j)')
+        ax.set_title('Black-Karasinski Trinomial Tree')
+        ax.set_xticks(range(num_steps))
+        plt.tight_layout()
+        plt.show()
+
+    def construct_binomial_tree(self, num_steps=3):
         # we will start with assuming theta and kappa are constant
         # here delta x = sigma sqrt(t)
-        return 1
 
+        tree_rates = np.full((num_steps, 2*num_steps + 1), np.nan)
+        tree_probs = np.full((num_steps, 2*num_steps + 1), np.nan)
 
-theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 
-         5: 0.07, 6: 0.07, 7: 0.07, 8: 0.07, 9: 0.07}
-theta = 0.05 # consant for now
-bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.02, dt=1)
+        dx = self.var * np.sqrt(self.dt)
+        ln_r0 = np.log(self.theta) # starting value
+
+        for i in range(num_steps):
+            for j in range(-i, i + 1,2):
+                x_n = ln_r0 + j * dx # price = starting price + position * factor: postion = +2 (upup), 0 (mid), -2 (downdown)
+                price = np.exp(x_n)
+                # compute probability of certain position to increase / decrease it's value
+                p_up = 1/2  + (self.k*(np.log(self.theta) - x_n) * np.sqrt(self.dt)) / (2 * self.var)
+                if(p_up < 0 or p_up > 1):
+                    print(f"WARNING p = {p_up}")
+
+                # add to matrix
+                col_index = j + num_steps
+                tree_rates[i, col_index] = price
+                tree_probs[i, col_index] = p_up
+
+        return tree_rates, tree_probs
+        
+    def plot_binomial_tree(self, num_steps=3):
+            # Fetch the rates and probabilities from your new method
+            tree_rates, tree_probs = self.construct_binomial_tree(num_steps=num_steps)
+
+            fig, ax = plt.subplots(figsize=(10, 7))
+            
+            for i in range(num_steps):
+                # Binomial nodes expand by 1 step up or down, meaning valid nodes step by 2
+                for j in range(-i, i + 1, 2):
+                    col_index = j + num_steps
+                    rate = tree_rates[i, col_index]
+                    
+                    # Skip unpopulated nodes
+                    if np.isnan(rate):
+                        continue
+
+                    # Draw edges to the next step's up/down children
+                    if i < num_steps - 1:
+                        # Up branch (j + 1)
+                        ax.plot([i, i + 1], [j, j + 1], 
+                                color='seagreen', alpha=0.6, linewidth=1.5, zorder=1)
+                        # Down branch (j - 1)
+                        ax.plot([i, i + 1], [j, j - 1], 
+                                color='indianred', alpha=0.6, linewidth=1.5, zorder=1)
+
+                    # Draw the vertex
+                    ax.scatter(i, j, color='steelblue', s=220, zorder=3, edgecolor='white')
+                    
+                    # Annotate the node with the physical rate
+                    ax.annotate(f"{rate:.4f}", (i, j), textcoords="offset points",
+                                xytext=(0, 12), ha='center', fontsize=8, zorder=4)
+
+            ax.set_xlabel('Time step')
+            ax.set_ylabel('Node index (j)')
+            ax.set_title('Black-Karasinski Binomial Tree')
+            ax.set_xticks(range(num_steps))
+            
+            # Adjust y-axis to comfortably fit the highest and lowest possible nodes
+            ax.set_ylim(-num_steps, num_steps)
+            
+            plt.tight_layout()
+            plt.show()
+
+# theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 
+#          5: 0.15, 6: 0.15, 7: 0.15, 8: 0.15, 9: 0.15}
+theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.1, 4: 0.1}
+bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
+bkm.plot_trinomial_tree_changing_mean(num_steps=5)
 # bkm.plot_paths()
-bkm.construct_trinomial_tree(num_steps=3)
+# theta = 0.05 # consant for now
+# bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
+
+# bkm.plot_trinomial_tree(num_steps=10)
+# bkm.plot_binomial_tree(num_steps=10)
