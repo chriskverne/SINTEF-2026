@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pennylane as qml
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
@@ -7,6 +8,7 @@ class BlackKarasinskiModel:
         self.theta = theta # currently constant
         self.var = var
         self.dt = dt
+        
 
     def generate_paths(self, n_paths=10, n_steps=10):
         r_start = self.theta[0]
@@ -170,6 +172,19 @@ class BlackKarasinskiModel:
                 tree_probs[i, col_index] = p_up
 
         return tree_rates, tree_probs
+    
+    def construct_binomial_tree_changing_mean(self, num_steps=3):
+        tree_rates = np.zeros((num_steps, 2*num_steps + 1))
+        tree_probs = np.full((num_steps, 2*num_steps + 1), np.nan)
+
+
+        for i in range(num_steps):
+            for j in range(-i, i, 2):
+                x_n = np.log(self.theta[i]) * j * (self.var * np.sqrt(self.dt))
+                tree_rates[i][j] = np.exp(x_n)
+                tree_probs[i][j] = 1/2 - (j * self.k * self.dt)/2 # probability only depends on position j and kappa which is rather clean
+
+            return tree_rates, tree_probs
         
     def plot_binomial_tree(self, num_steps=3):
             # Fetch the rates and probabilities from your new method
@@ -213,6 +228,39 @@ class BlackKarasinskiModel:
             
             plt.tight_layout()
             plt.show()
+
+
+    def compute_quantum_angles(self, num_steps=3):
+        angles = {}
+        for i in range(num_steps):
+            for j in range(-i, i + 1):
+                a = - self.k * j * self.dt
+                p_up = 1/6 + (a**2 + a) / 2
+                p_mid = 2/3 - a**2
+                p_down = 1/6 + (a**2 - a) / 2
+
+                # 1) Select whether we go to mid or not
+                theta1 = 2 * np.arccos(np.sqrt(p_mid))
+
+                # 2) If we don't go to mid, fid prob for up/down
+                theta2 = 2 * np.arcsin(np.sqrt(p_up / (p_up + p_down)))
+
+                angles[(i, j)] = (theta1, theta2)
+
+        return angles
+
+
+    def quantum_trinomial_state(self, num_steps=3):
+        # t=0: v=1, t=1: v=3, t=2: v=5, t=3: v=7, t=4: v=9
+        # we need 2t + 1 vertices log ceil(log(2t+1)) qubit to represent all states 
+        
+        # for each time step we must use a different probability based on positon j which I assume requires some CTRL Ry based rotation
+        # p_up = 1/6 a^2 + a / 2 where a = -k j dt so j will depend on the position of the node making this non-trivial.
+
+
+        return 0
+    
+
 
 # theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 
 #          5: 0.15, 6: 0.15, 7: 0.15, 8: 0.15, 9: 0.15}
