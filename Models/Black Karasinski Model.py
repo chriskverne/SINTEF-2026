@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pennylane as qml
+import math
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
@@ -9,7 +10,6 @@ class BlackKarasinskiModel:
         self.var = var
         self.dt = dt
         
-
     def generate_paths(self, n_paths=10, n_steps=10):
         r_start = self.theta[0]
         ln_r = np.log(r_start)
@@ -229,47 +229,125 @@ class BlackKarasinskiModel:
             plt.tight_layout()
             plt.show()
 
-
-    def compute_quantum_angles(self, num_steps=3):
-        angles = {}
-        for i in range(num_steps):
-            for j in range(-i, i + 1):
-                a = - self.k * j * self.dt
+    def compute_step_angles(self, num_steps):
+            angles = {}
+            
+            # The maximum span of j after num_steps (where i goes up to num_steps - 1)
+            max_j = num_steps - 1
+            
+            for j in range(-max_j, max_j + 1):
+                a = -self.k * j * self.dt
+                
+                # Calculate raw trinomial probabilities
                 p_up = 1/6 + (a**2 + a) / 2
                 p_mid = 2/3 - a**2
                 p_down = 1/6 + (a**2 - a) / 2
 
-                # 1) Select whether we go to mid or not
-                theta1 = 2 * np.arccos(np.sqrt(p_mid))
+                # |00> = down, |01> = mid, |10> = up
+                
+                # 1. Up or not up?
+                theta_1 = 2 * np.arcsin(np.sqrt(p_up))
 
-                # 2) If we don't go to mid, fid prob for up/down
-                theta2 = 2 * np.arcsin(np.sqrt(p_up / (p_up + p_down)))
+                # 2. Mid or down?
+                theta_2 = 2 * np.arcsin(np.sqrt(p_mid / (p_mid + p_down)))
 
-                angles[(i, j)] = (theta1, theta2)
+                # Key is just the position 'j'
+                angles[j] = (theta_1, theta_2)
 
-        return angles
+            return angles
 
 
-    def quantum_trinomial_state(self, num_steps=3):
-        # t=0: v=1, t=1: v=3, t=2: v=5, t=3: v=7, t=4: v=9
-        # we need 2t + 1 vertices log ceil(log(2t+1)) qubit to represent all states 
+    def quantum_trinomial_state(self, T=3):
+        angles = self.compute_step_angles(T)
+
+        num_state_qubits = 2 * T
+        num_pos_qubits = math.ceil(math.log2(2 * T + 1))
+
+        state_wires = [f"s{i}" for i in range(num_state_qubits)]
+        pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
+        all_wires = state_wires + pos_wires
+        dev = qml.device("default.qubit", wires=all_wires)
+
+
+        # increases / decreases the position by 1 whether we are up / down / mid.
+        dim = 2 ** num_pos_qubits
+        U_inc = np.roll(np.eye(dim), 1, axis=0)
+        U_dec = np.roll(np.eye(dim), -1, axis=0)
         
-        # for each time step we must use a different probability based on positon j which I assume requires some CTRL Ry based rotation
-        # p_up = 1/6 a^2 + a / 2 where a = -k j dt so j will depend on the position of the node making this non-trivial.
+        @qml.qnode(dev)
+        def circuit():
+            # prepare position register
+            binary_offset = format(T, f'0{num_pos_qubits}b')
+            for idx, bit in enumerate(binary_offset):
+                if bit == '1':
+                    qml.PauliX(wires=pos_wires[idx])
 
 
-        return 0
+            # get angle for j = 0
+            theta_1, theta_2 = angles[0]
+            # apply U(0)
+            qml.RY(theta_1, wires=state_wires[0])
+            qml.ctrl(qml.RY(theta_2, wires=state_wires[1]), control=state_wires[0], control_values=[0])
+
+
+            # Update position based on state (up, mid, down)
+            for step in range(1, T):
+                # Grab the wires from the step we just completed
+                prev_s0 = state_wires[2 * (step - 1)]
+                prev_s1 = state_wires[2 * (step - 1) + 1]
+                
+                # Grab the fresh wires for the current step
+                curr_s0 = state_wires[2 * step]
+                curr_s1 = state_wires[2 * step + 1]
+                                
+                # IF |00> (Down): Decrement the position
+                qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[0, 0])(
+                    U_dec, wires=pos_wires
+                )
+                # IF |01> (Mid): Do nothing (Identity)
+                # IF |10> (Up): Increment the position
+                qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[1, 0])(
+                    U_inc, wires=pos_wires
+                )
+
+                for j in range(-step, step + 1):
+                    # get angle at position j
+                    theta_1, theta_2 = angles[j]
+                    
+                    # Calculate the corresponding offset binary state of the position register
+                    pos_val = j + T
+                    pos_bin = format(pos_val, f'0{num_pos_qubits}b')
+                    ctrl_vals = [int(b) for b in pos_bin]
+                    
+                    qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
+                        theta_1, wires=curr_s0
+                    )
+                    
+                    combined_ctrl_wires = pos_wires + [curr_s0]
+                    combined_ctrl_vals = ctrl_vals + [0]
+                    
+                    qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
+                        theta_2, wires=curr_s1
+                    )
+
+            return qml.probs(wires=pos_wires)
+
+            
+        return circuit()
+
     
 
 
 # theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 
 #          5: 0.15, 6: 0.15, 7: 0.15, 8: 0.15, 9: 0.15}
-theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.1, 4: 0.1}
-bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
-bkm.plot_trinomial_tree_changing_mean(num_steps=5)
-# bkm.plot_paths()
-# theta = 0.05 # consant for now
+# theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.1, 4: 0.1}
 # bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
+# bkm.plot_trinomial_tree_changing_mean(num_steps=5)
+# bkm.plot_paths(n_paths=len(theta), n_steps=len(theta))
 
+
+theta = 0.05 # consant for now
+bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
+print(bkm.quantum_trinomial_state(T=6))
 # bkm.plot_trinomial_tree(num_steps=10)
 # bkm.plot_binomial_tree(num_steps=10)
