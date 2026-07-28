@@ -257,6 +257,79 @@ class BlackKarasinskiModel:
             return angles
 
 
+    # def quantum_trinomial_state(self, T=3):
+    #     angles = self.compute_step_angles(T)
+
+    #     num_state_qubits = 2 * T
+    #     num_pos_qubits = math.ceil(math.log2(2 * T + 1))
+
+    #     state_wires = [f"s{i}" for i in range(num_state_qubits)]
+    #     pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
+    #     all_wires = state_wires + pos_wires
+    #     dev = qml.device("default.qubit", wires=all_wires)
+
+
+    #     # increases / decreases the position by 1 whether we are up / down / mid.
+    #     dim = 2 ** num_pos_qubits
+    #     U_inc = np.roll(np.eye(dim), 1, axis=0)
+    #     U_dec = np.roll(np.eye(dim), -1, axis=0)
+        
+    #     @qml.qnode(dev)
+    #     def circuit():
+    #         # prepare position register
+    #         binary_offset = format(T, f'0{num_pos_qubits}b')
+    #         for idx, bit in enumerate(binary_offset):
+    #             if bit == '1':
+    #                 qml.PauliX(wires=pos_wires[idx])
+
+    #         ############## STEP 1 FIRST U rot ##########################
+    #         # get angle for j = 0
+    #         theta_1, theta_2 = angles[0]
+    #         # apply U(0)
+    #         qml.RY(theta_1, wires=state_wires[0])
+    #         qml.ctrl(qml.RY(theta_2, wires=state_wires[1]), control=state_wires[0], control_values=[0])
+
+
+    #         # Update position based on state (up, mid, down)
+    #         for step in range(1, T):
+    #             ############## STEP 2: Update position ######################
+    #             prev_s0 = state_wires[2 * (step - 1)] # qubit 1 (updated state)
+    #             prev_s1 = state_wires[2 * (step - 1) + 1] # qubit 2 (updated state)
+    #             curr_s0 = state_wires[2 * step] # next 2 qubits we want to update state to
+    #             curr_s1 = state_wires[2 * step + 1] # next 2 qubits we want to apply position update to
+                                
+    #             # IF |00> (Down): Decrement the position
+    #             qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[0, 0])(
+    #                 U_dec, wires=pos_wires)
+    #             # IF |01> (Mid): Do nothing (Identity)
+    #             # IF |10> (Up): Increment the position
+    #             qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[1, 0])(
+    #                 U_inc, wires=pos_wires)
+
+    #             ############## STEP 3: Apply U(j) ########################## if pos = j apply rot
+    #             for j in range(-step, step + 1):
+    #                 theta_1, theta_2 = angles[j] # get angle at position j
+
+    #                 pos_val = j + T # shift (if j = -T make pos_val = 0. if j = 0 make pos_val = T, if j = T make pos_val = 2T)
+    #                 pos_bin = format(pos_val, f'0{num_pos_qubits}b')
+    #                 ctrl_vals = [int(b) for b in pos_bin]
+
+    #                 # Apply RY_1(j) if pos = j to curr_s0 qubit
+    #                 qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
+    #                     theta_1, wires=curr_s0)
+
+    #                 # Apply RY_2(j) if pos = j and that curr_s0 = 0 (not up)
+    #                 combined_ctrl_wires = pos_wires + [curr_s0]
+    #                 combined_ctrl_vals = ctrl_vals + [0]
+    #                 qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
+    #                     theta_2, wires=curr_s1)
+
+    #         return qml.probs(wires=state_wires), qml.probs(wires=pos_wires)
+
+            
+    #     return circuit()
+
+   
     def quantum_trinomial_state(self, T=3):
         angles = self.compute_step_angles(T)
 
@@ -282,7 +355,7 @@ class BlackKarasinskiModel:
                 if bit == '1':
                     qml.PauliX(wires=pos_wires[idx])
 
-
+            ############## STEP 1: INITIAL U rot ##########################
             # get angle for j = 0
             theta_1, theta_2 = angles[0]
             # apply U(0)
@@ -290,50 +363,110 @@ class BlackKarasinskiModel:
             qml.ctrl(qml.RY(theta_2, wires=state_wires[1]), control=state_wires[0], control_values=[0])
 
 
-            # Update position based on state (up, mid, down)
-            for step in range(1, T):
-                # Grab the wires from the step we just completed
-                prev_s0 = state_wires[2 * (step - 1)]
-                prev_s1 = state_wires[2 * (step - 1) + 1]
+            # Run the loop T times to ensure the final position is always updated
+            for step in range(1, T + 1):
                 
-                # Grab the fresh wires for the current step
-                curr_s0 = state_wires[2 * step]
-                curr_s1 = state_wires[2 * step + 1]
+                ############## STEP 2: Update position ######################
+                # Grab the qubits from the jump that JUST happened
+                prev_s0 = state_wires[2 * (step - 1)] 
+                prev_s1 = state_wires[2 * (step - 1) + 1] 
                                 
                 # IF |00> (Down): Decrement the position
                 qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[0, 0])(
-                    U_dec, wires=pos_wires
-                )
+                    U_dec, wires=pos_wires)
                 # IF |01> (Mid): Do nothing (Identity)
                 # IF |10> (Up): Increment the position
                 qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[1, 0])(
-                    U_inc, wires=pos_wires
-                )
+                    U_inc, wires=pos_wires)
 
-                for j in range(-step, step + 1):
-                    # get angle at position j
-                    theta_1, theta_2 = angles[j]
+                ############## STEP 3: Prepare Next U(j) ####################
+                # Only prepare the next jump if we are NOT on the final step
+                if step < T:
+                    curr_s0 = state_wires[2 * step] 
+                    curr_s1 = state_wires[2 * step + 1] 
                     
-                    # Calculate the corresponding offset binary state of the position register
-                    pos_val = j + T
-                    pos_bin = format(pos_val, f'0{num_pos_qubits}b')
-                    ctrl_vals = [int(b) for b in pos_bin]
-                    
-                    qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
-                        theta_1, wires=curr_s0
-                    )
-                    
-                    combined_ctrl_wires = pos_wires + [curr_s0]
-                    combined_ctrl_vals = ctrl_vals + [0]
-                    
-                    qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
-                        theta_2, wires=curr_s1
-                    )
+                    for j in range(-step, step + 1):
+                        theta_1, theta_2 = angles[j] 
 
-            return qml.probs(wires=pos_wires)
+                        pos_val = j + T 
+                        pos_bin = format(pos_val, f'0{num_pos_qubits}b')
+                        ctrl_vals = [int(b) for b in pos_bin]
 
-            
+                        # Apply RY_1(j) if pos = j
+                        qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
+                            theta_1, wires=curr_s0)
+
+                        # Apply RY_2(j) if pos = j and curr_s0 = 0
+                        combined_ctrl_wires = pos_wires + [curr_s0]
+                        combined_ctrl_vals = ctrl_vals + [0]
+                        qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
+                            theta_2, wires=curr_s1)
+
+            return qml.probs(wires=state_wires), qml.probs(wires=pos_wires)
+
         return circuit()
+
+    def plot_path_states(self, T):
+        # Unpack the first item in the tuple (state probabilities)
+        state_probs, _ = self.quantum_trinomial_state(T)
+        
+        num_state_qubits = 2 * T
+        valid_labels = []
+        valid_probs = []
+        
+        for i, prob in enumerate(state_probs):
+            if prob > 1e-5:
+                binary_state = format(i, f'0{num_state_qubits}b')
+                readable_state = " ".join([binary_state[k:k+2] for k in range(0, len(binary_state), 2)])
+                valid_labels.append(readable_state)
+                valid_probs.append(prob)
+                
+        plt.figure(figsize=(12, 5))
+        plt.bar(valid_labels, valid_probs, color='seagreen', edgecolor='black')
+        plt.xlabel('Path History')
+        plt.ylabel('Probability')
+        plt.title(f'Probability of Each Unique Path (T={T})')
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.show()
+
+
+    def plot_position_states(self, T):
+        # Unpack the second item in the tuple (position probabilities)
+        _, pos_probs = self.quantum_trinomial_state(T)
+        
+        num_pos_qubits = math.ceil(math.log2(2 * T + 1))
+        
+        j_values = []
+        j_probs = []
+        
+        # Loop through all possible states in the position register
+        for i, prob in enumerate(pos_probs):
+            # i is the physical integer (pos_val). 
+            # We subtract T to get the logical position (j)
+            j = i - T 
+            
+            # We only care about valid j positions between -T and T
+            if -T <= j <= T:
+                j_values.append(j)
+                j_probs.append(prob)
+                
+        plt.figure(figsize=(10, 5))
+        plt.bar(j_values, j_probs, color='royalblue', edgecolor='black')
+        plt.xlabel('Final Position (j)')
+        plt.ylabel('Probability')
+        plt.title(f'Aggregated Position Distribution (T={T})')
+        plt.xticks(range(-T, T + 1)) # Force x-axis to show all j integer ticks
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Add labels on top of the bars for clarity
+        for i, prob in enumerate(j_probs):
+            if prob > 0.001:
+                plt.text(j_values[i], prob + 0.01, f'{prob:.3f}', ha='center', va='bottom', fontsize=9)
+                
+        plt.tight_layout()
+        plt.show()
+
 
     
 
@@ -346,8 +479,10 @@ class BlackKarasinskiModel:
 # bkm.plot_paths(n_paths=len(theta), n_steps=len(theta))
 
 
-theta = 0.05 # consant for now
-bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.2, dt=1)
-print(bkm.quantum_trinomial_state(T=6))
+theta = 0.5 # consant for now
+bkm = BlackKarasinskiModel(k=0.1, theta=theta, var=0.1, dt=1)
+bkm.plot_position_states(T=3)
+# bkm.plot_path_states(T=3)
+# print(bkm.quantum_trinomial_state(T=6))
 # bkm.plot_trinomial_tree(num_steps=10)
 # bkm.plot_binomial_tree(num_steps=10)
