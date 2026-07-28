@@ -273,7 +273,7 @@ class BlackKarasinskiModel:
         state_wires = [f"s{i}" for i in range(num_state_qubits)]
         pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
         all_wires = state_wires + pos_wires
-        dev = qml.device("default.qubit", wires=all_wires)
+        dev = qml.device("lightning.gpu", wires=all_wires)
 
 
         # increases / decreases the position by 1 whether we are up / down / mid.
@@ -362,7 +362,8 @@ class BlackKarasinskiModel:
         plt.title(f'Probability of Each Unique Path (T={T})')
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
-        plt.show()
+        plt.savefig('./figures/gpurun.png')
+        # plt.show()
 
 
     def plot_position_states(self, T):
@@ -399,7 +400,9 @@ class BlackKarasinskiModel:
                 plt.text(j_values[i], prob + 0.01, f'{prob:.3f}', ha='center', va='bottom', fontsize=9)
                 
         plt.tight_layout()
-        plt.show()
+        plt.savefig('./figures/gpurun.png')
+
+        # plt.show()
 
 
     
