@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import pennylane as qml
 import math
 from scipy.stats import norm, entropy, wasserstein_distance
+import json
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
@@ -316,8 +317,7 @@ class BlackKarasinskiModel:
                     U_inc, wires=pos_wires)
 
                 ############## STEP 3: Prepare Next U(j) ####################
-                # Only prepare the next jump if we are NOT on the final step
-                if step < T:
+                if step < T: #skip last step
                     curr_s0 = state_wires[2 * step] 
                     curr_s1 = state_wires[2 * step + 1] 
                     
@@ -428,85 +428,153 @@ class BlackKarasinskiModel:
         return x_values, probs
 
     def divergence(self, T):
-        # --- 1. DATA PREPARATION (Math & Formatting) ---
+        # --- 1. DATA PREPARATION ---
         _, pos_probs = self.quantum_trinomial_state(T)
         
-        # Shift x-axis to represent ln(r)
+        # Grid spacing and state space
         dx = np.sqrt(self.var * 3 * self.dt)
         j_values = np.arange(-T, T + 1)
         x_values = self.theta + j_values * dx
         
-        # Extract and normalize quantum probabilities
+        # Quantum probabilities
         q_probs = np.array([pos_probs[j + T] for j in j_values])
         q_probs = np.maximum(q_probs, 1e-12)
         q_probs /= np.sum(q_probs)
         
-        # Get true discrete probabilities (for metrics)
+        # Analytical discrete probabilities
         _, t_probs = self.true_prob_dist(T)
         t_probs = np.maximum(t_probs, 1e-12)
         t_probs /= np.sum(t_probs)
         
-        # Calculate continuous curve using the CORRECT variance logic
+        # Analytical continuous parameters
         t = T * self.dt
-        mean = self.theta
-        variance = self.var * t if self.k == 0 else (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
+        true_mean = self.theta
+        true_var = self.var * t if self.k == 0 else (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
         
         x_dense = np.linspace(x_values[0], x_values[-1], 200)
-        pdf_dense = norm.pdf(x_dense, loc=mean, scale=np.sqrt(variance)) * dx
+        pdf_dense = norm.pdf(x_dense, loc=true_mean, scale=np.sqrt(true_var)) * dx
         
-        # Compute metrics
-        kl_div = entropy(q_probs, t_probs)
-        wass_dist = wasserstein_distance(x_values, x_values, q_probs, t_probs)
-        fisher_rao = 2 * np.arccos(np.clip(np.sum(np.sqrt(q_probs * t_probs)), 0.0, 1.0))
+        # --- 2. MOMENT & DISTANCE CALCULATIONS ---
+        # Empirical moments from quantum distribution
+        q_mean = float(np.sum(q_probs * x_values))
+        q_var = float(np.sum(q_probs * ((x_values - q_mean) ** 2)))
         
+        # Absolute errors
+        mean_err = abs(q_mean - true_mean)
+        var_err = abs(q_var - true_var)
         
-        # --- 2. PLOTTING (Visuals Only) ---
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        # Distance metrics
+        kl_div = float(entropy(q_probs, t_probs))
+        wass_dist = float(wasserstein_distance(x_values, x_values, q_probs, t_probs))
+        fisher_rao = float(2 * np.arccos(np.clip(np.sum(np.sqrt(q_probs * t_probs)), 0.0, 1.0)))
         
-        # Quantum Bars
+        # Structured metrics dictionary
+        metrics = {
+            "dt": self.dt,
+            "T": T,
+            "kl_divergence": kl_div,
+            "wasserstein_distance": wass_dist,
+            "fisher_rao_distance": fisher_rao,
+            "quantum_mean": q_mean,
+            "true_mean": true_mean,
+            "mean_error": mean_err,
+            "quantum_var": q_var,
+            "true_var": true_var,
+            "var_error": var_err
+        }
+        
+        # --- 3. PLOTTING INDIVIDUAL STEP ---
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        
+        # Left Panel: Distribution Comparison
         axes[0].bar(x_values, q_probs, width=dx * 0.8, color='royalblue', edgecolor='black', alpha=0.7, label='Quantum')
-        
-        # Continuous Curve
         axes[0].plot(x_dense, pdf_dense, color='red', linestyle='dashed', label='Continuous')
-        
         axes[0].set_xlabel('State Variable (x = ln(r))')
         axes[0].set_ylabel('Probability')
-        axes[0].set_title(f'Distribution Comparison (T={T})')
+        axes[0].set_title(f'Distribution Comparison (dt={self.dt}, T={T})')
         axes[0].legend()
         axes[0].grid(axis='y', linestyle='--', alpha=0.7)
         
-        # Metrics Text
+        # Right Panel: Text Metrics Summary
         axes[1].axis('off')
-        axes[1].text(0.5, 0.7, f"KL Divergence:\n{kl_div:.6f}", ha='center', va='center', fontsize=14)
-        axes[1].text(0.5, 0.5, f"Wasserstein Dist:\n{wass_dist:.6f}", ha='center', va='center', fontsize=14)
-        axes[1].text(0.5, 0.3, f"Fisher-Rao Dist:\n{fisher_rao:.6f}", ha='center', va='center', fontsize=14)
-        axes[1].set_title('Metrics', fontsize=14)
+        summary_text = (
+            f"--- Distance Metrics ---\n"
+            f"KL Divergence:   {kl_div:.6f}\n"
+            f"Wasserstein Dist:{wass_dist:.6f}\n"
+            f"Fisher-Rao Dist: {fisher_rao:.6f}\n\n"
+            f"--- Moment Errors ---\n"
+            f"Mean Error:      {mean_err:.6f}\n"
+            f"  (Q: {q_mean:.4f} | True: {true_mean:.4f})\n\n"
+            f"Var Error:       {var_err:.6f}\n"
+            f"  (Q: {q_var:.4f} | True: {true_var:.4f})"
+        )
+        axes[1].text(0.1, 0.5, summary_text, ha='left', va='center', fontsize=11, family='monospace')
+        axes[1].set_title('Metrics & Moments Summary', fontsize=14)
         
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"./figures/dt={self.dt}_T={T}_k={self.k}.png")
+        plt.close() # Close figure to free memory during batch loops
         
-        return kl_div, wass_dist, fisher_rao
- 
-bkm1 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=1)
-bkm2 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=0.5)
-bkm3 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=0.25)
+        return metrics
 
 
-kl, wass, fr = bkm1.divergence(T=2)
-kl2, wass2, fr2 = bkm2.divergence(T=4)
-kl3, wass3, fr3 = bkm3.divergence(T=8)
 
-print(f"KL Divergence: {kl:.6f}")
-print(f"Wasserstein Distance: {wass:.6f}")
-print(f"Fisher-Rao Distance: {fr:.6f}")
-print('===========================================================')
-print(f"KL Divergence: {kl2:.6f}")
-print(f"Wasserstein Distance: {wass2:.6f}")
-print(f"Fisher-Rao Distance: {fr2:.6f}")
-print('===========================================================')
-print(f"KL Divergence: {kl3:.6f}")
-print(f"Wasserstein Distance: {wass3:.6f}")
-print(f"Fisher-Rao Distance: {fr3:.6f}")
+dt_configs = [1,0.5,0.25,0.125]
+T_configs = [1, 2, 4, 8]
+
+results_history = []
+
+for dt, T in zip(dt_configs, T_configs):
+    bkm = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=dt)
+    metrics = bkm.divergence(T=T)
+    results_history.append(metrics)
+    
+    # Save step-by-step JSON
+    json_data = {
+        "parameters": {
+            "dt": dt,
+            "T": T,
+            "k": bkm.k,
+            "theta": bkm.theta,
+            "var": bkm.var
+        },
+        "metrics": metrics
+    }
+    
+    file_path = f"./figures/dt={dt}_T={T}_k={bkm.k}.json"
+    with open(file_path, "w") as f:
+        json.dump(json_data, f, indent=4)
+        
+    print(f"Completed dt={dt}, T={T} -> Saved image & JSON.")
+
+
+# --- COMBINED CONVERGENCE PLOT ---
+dts = [m["dt"] for m in results_history]
+kl_divs = [m["kl_divergence"] for m in results_history]
+wass_dists = [m["wasserstein_distance"] for m in results_history]
+mean_errs = [m["mean_error"] for m in results_history]
+var_errs = [m["var_error"] for m in results_history]
+
+plt.figure(figsize=(10, 6))
+
+# Plot each metric error as its own line
+plt.plot(dts, kl_divs, marker='o', linewidth=2, label='KL Divergence')
+plt.plot(dts, wass_dists, marker='s', linewidth=2, label='Wasserstein Distance')
+plt.plot(dts, mean_errs, marker='^', linewidth=2, label='Mean Error')
+plt.plot(dts, var_errs, marker='d', linewidth=2, label='Variance Error')
+
+# Invert x-axis so moving left to right represents dt shrinking (convergence)
+plt.gca().invert_xaxis()
+
+plt.xlabel('Step Size (dt) [Shrinking →]', fontsize=12)
+plt.ylabel('Error / Distance Magnitude', fontsize=12)
+plt.title('Quantum Model Convergence as dt → 0 (Fixed Horizon t=1.0)', fontsize=14)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.legend(fontsize=11)
+plt.tight_layout()
+
+plt.savefig("./figures/global_convergence_plot.png")
+plt.show()
 
 
 """Classical plots"""

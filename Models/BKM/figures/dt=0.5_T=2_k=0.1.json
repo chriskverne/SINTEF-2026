@@ -1,0 +1,22 @@
+{
+    "parameters": {
+        "dt": 0.5,
+        "T": 2,
+        "k": 0.1,
+        "theta": 0.5,
+        "var": 0.1
+    },
+    "metrics": {
+        "dt": 0.5,
+        "T": 2,
+        "kl_divergence": 0.0013147034988208166,
+        "wasserstein_distance": 0.005775357631070767,
+        "fisher_rao_distance": 0.0503021612148524,
+        "quantum_mean": 0.5,
+        "true_mean": 0.5,
+        "mean_error": 0.0,
+        "quantum_var": 0.09512500000000003,
+        "true_var": 0.09063462346100909,
+        "var_error": 0.0044903765389909395
+    }
+}
