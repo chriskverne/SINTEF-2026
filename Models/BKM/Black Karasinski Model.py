@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pennylane as qml
 import math
+from scipy.stats import norm, entropy, wasserstein_distance
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
@@ -274,6 +275,7 @@ class BlackKarasinskiModel:
         pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
         all_wires = state_wires + pos_wires
         dev = qml.device("default.qubit", wires=all_wires)
+        # dev = qml.device("default.tensor", wires=all_wires)
 
 
         # increases / decreases the position by 1 whether we are up / down / mid.
@@ -400,14 +402,114 @@ class BlackKarasinskiModel:
                 plt.text(j_values[i], prob + 0.01, f'{prob:.3f}', ha='center', va='bottom', fontsize=9)
                 
         plt.tight_layout()
-        plt.savefig('./figures/gpurun.png')
+        plt.savefig(f"./figures/gpurun_T={T}.png")
 
         plt.show()
 
+        return j_values, j_probs
 
-    
+    def true_prob_dist(self, T):
+        dx = np.sqrt(self.var * 3 * self.dt)
+        j_values = np.arange(-T, T + 1)
+        x_values = self.theta + j_values * dx
+        
+        t = T * self.dt
+        
+        if self.k == 0:
+            mean = self.theta
+            variance = self.var * t
+        else:
+            mean = self.theta
+            variance = (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
+        
+        probs = norm.pdf(x_values, loc=mean, scale=np.sqrt(variance))
+        probs /= np.sum(probs)
+        
+        return x_values, probs
+
+    def divergence(self, T):
+        # --- 1. DATA PREPARATION (Math & Formatting) ---
+        _, pos_probs = self.quantum_trinomial_state(T)
+        
+        # Shift x-axis to represent ln(r)
+        dx = np.sqrt(self.var * 3 * self.dt)
+        j_values = np.arange(-T, T + 1)
+        x_values = self.theta + j_values * dx
+        
+        # Extract and normalize quantum probabilities
+        q_probs = np.array([pos_probs[j + T] for j in j_values])
+        q_probs = np.maximum(q_probs, 1e-12)
+        q_probs /= np.sum(q_probs)
+        
+        # Get true discrete probabilities (for metrics)
+        _, t_probs = self.true_prob_dist(T)
+        t_probs = np.maximum(t_probs, 1e-12)
+        t_probs /= np.sum(t_probs)
+        
+        # Calculate continuous curve using the CORRECT variance logic
+        t = T * self.dt
+        mean = self.theta
+        variance = self.var * t if self.k == 0 else (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
+        
+        x_dense = np.linspace(x_values[0], x_values[-1], 200)
+        pdf_dense = norm.pdf(x_dense, loc=mean, scale=np.sqrt(variance)) * dx
+        
+        # Compute metrics
+        kl_div = entropy(q_probs, t_probs)
+        wass_dist = wasserstein_distance(x_values, x_values, q_probs, t_probs)
+        fisher_rao = 2 * np.arccos(np.clip(np.sum(np.sqrt(q_probs * t_probs)), 0.0, 1.0))
+        
+        
+        # --- 2. PLOTTING (Visuals Only) ---
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Quantum Bars
+        axes[0].bar(x_values, q_probs, width=dx * 0.8, color='royalblue', edgecolor='black', alpha=0.7, label='Quantum')
+        
+        # Continuous Curve
+        axes[0].plot(x_dense, pdf_dense, color='red', linestyle='dashed', label='Continuous')
+        
+        axes[0].set_xlabel('State Variable (x = ln(r))')
+        axes[0].set_ylabel('Probability')
+        axes[0].set_title(f'Distribution Comparison (T={T})')
+        axes[0].legend()
+        axes[0].grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Metrics Text
+        axes[1].axis('off')
+        axes[1].text(0.5, 0.7, f"KL Divergence:\n{kl_div:.6f}", ha='center', va='center', fontsize=14)
+        axes[1].text(0.5, 0.5, f"Wasserstein Dist:\n{wass_dist:.6f}", ha='center', va='center', fontsize=14)
+        axes[1].text(0.5, 0.3, f"Fisher-Rao Dist:\n{fisher_rao:.6f}", ha='center', va='center', fontsize=14)
+        axes[1].set_title('Metrics', fontsize=14)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return kl_div, wass_dist, fisher_rao
+ 
+bkm1 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=1)
+bkm2 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=0.5)
+bkm3 = BlackKarasinskiModel(k=0.1, theta=0.5, var=0.1, dt=0.25)
 
 
+kl, wass, fr = bkm1.divergence(T=2)
+kl2, wass2, fr2 = bkm2.divergence(T=4)
+kl3, wass3, fr3 = bkm3.divergence(T=8)
+
+print(f"KL Divergence: {kl:.6f}")
+print(f"Wasserstein Distance: {wass:.6f}")
+print(f"Fisher-Rao Distance: {fr:.6f}")
+print('===========================================================')
+print(f"KL Divergence: {kl2:.6f}")
+print(f"Wasserstein Distance: {wass2:.6f}")
+print(f"Fisher-Rao Distance: {fr2:.6f}")
+print('===========================================================')
+print(f"KL Divergence: {kl3:.6f}")
+print(f"Wasserstein Distance: {wass3:.6f}")
+print(f"Fisher-Rao Distance: {fr3:.6f}")
+
+
+"""Classical plots"""
 # theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 
 #          5: 0.15, 6: 0.15, 7: 0.15, 8: 0.15, 9: 0.15}
 # theta = {0: 0.05, 1: 0.05, 2: 0.05, 3: 0.1, 4: 0.1}
@@ -415,11 +517,21 @@ class BlackKarasinskiModel:
 # bkm.plot_trinomial_tree_changing_mean(num_steps=5)
 # bkm.plot_paths(n_paths=len(theta), n_steps=len(theta))
 
+"""Quantum state prep"""
 
-theta = 0.5 # consant for now
-bkm = BlackKarasinskiModel(k=0.0, theta=theta, var=0.1, dt=1)
-bkm.plot_position_states(T=8)
+# theta = 0.5 # consant for now
+# bkm = BlackKarasinskiModel(k=0.0, theta=theta, var=0.1, dt=1)
+# bkm.plot_position_states(T=4)
 # bkm.plot_path_states(T=8)
 # print(bkm.quantum_trinomial_state(T=6))
 # bkm.plot_trinomial_tree(num_steps=10)
 # bkm.plot_binomial_tree(num_steps=10)
+
+
+
+
+#### TODO #####
+# (1) Change dt to smaller value e.g. dt = 0.5 with 2T steps comparedd to dt = 1 with T steps
+# (2) Compute classical distribution and compute divergence or wasserstein with true distribution
+# (3) Try different values of k(t)
+# (4) Use Tensor netwokrs (need argument for why they don't work here)

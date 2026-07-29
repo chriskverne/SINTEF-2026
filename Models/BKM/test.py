@@ -1,225 +1,163 @@
-"""
-Black-Karasinski trinomial tree -> quantum state preparation, simulated with
-matrix product states (MPS) instead of a dense statevector.
-
-Only the *position* register (node index j) is measured. The per-step branch
-qubits are still in the circuit (they carry the path history) but we never
-ask for their joint distribution, which is what keeps this tractable.
-
-Why MPS works here:
-    The past only talks to the future through the current position j, which
-    takes 2T+1 values. So the Schmidt rank across any time-cut is <= 2T+1 and
-    an MPS with max_bond_dim >= 2T+1 is EXACT (no truncation error).
-"""
-
 import math
-
 import numpy as np
-import matplotlib.pyplot as plt
 import pennylane as qml
+import matplotlib.pyplot as plt
 
-
-class BKTrinomialQuantum:
-    def __init__(self, k, var, dt):
-        self.k = k
-        self.var = var          # only needed to map j -> rate, not for the walk
+class BlackKarasinskiModel:
+    def __init__(self, k, theta, var, dt):
+        self.k = k # currently constant
+        self.theta = theta # currently constant
+        self.var = var
         self.dt = dt
 
-    # ------------------------------------------------------------------
-    # 1. Branch probabilities and the rotation angles that encode them
-    # ------------------------------------------------------------------
-    def _branch_probs(self, j):
-        """Hull-White style trinomial branching probabilities at node j."""
-        a = -self.k * j * self.dt
-        p_up = 1 / 6 + (a**2 + a) / 2
-        p_mid = 2 / 3 - a**2
-        p_down = 1 / 6 + (a**2 - a) / 2
-
-        eps = 1e-12
-        p_up, p_mid, p_down = max(p_up, eps), max(p_mid, eps), max(p_down, eps)
-        s = p_up + p_mid + p_down
-        return p_up / s, p_mid / s, p_down / s
-
-    def compute_step_angles(self, T):
-        """
-        angles[j] = (theta_1, theta_2) for the 2-qubit branch encoding
-            |10> = up, |01> = mid, |00> = down
-        theta_1: up vs not-up.   theta_2: mid vs down, given not-up.
-        """
+    def compute_step_angles(self, num_steps):
         angles = {}
-        max_j = T - 1                       # |j| can be at most T-1 when branching
+        
+        # The maximum span of j after num_steps (where i goes up to num_steps - 1)
+        max_j = num_steps - 1
+        
         for j in range(-max_j, max_j + 1):
-            p_up, p_mid, p_down = self._branch_probs(j)
+            a = -self.k * j * self.dt
+            
+            # Calculate raw trinomial probabilities
+            p_up = 1/6 + (a**2 + a) / 2
+            p_mid = 2/3 - a**2
+            p_down = 1/6 + (a**2 - a) / 2
+
+            # Prevent negative probs:
+            eps = 1e-8
+            p_up = max(p_up, eps)
+            p_mid = max(p_mid, eps)
+            p_down = max(p_down, eps)
+            total_p = p_up + p_mid + p_down
+            p_up /= total_p
+            p_mid /= total_p
+            p_down /= total_p
+
+            # |00> = down, |01> = mid, |10> = up
+            # 1. Up or not up?
             theta_1 = 2 * np.arcsin(np.sqrt(p_up))
+            # 2. Mid or down?
             theta_2 = 2 * np.arcsin(np.sqrt(p_mid / (p_mid + p_down)))
+
+            # key is position 'j'
             angles[j] = (theta_1, theta_2)
+
         return angles
 
-    # ------------------------------------------------------------------
-    # 2. Wire layout
-    # ------------------------------------------------------------------
-    def _layout(self, T):
-        """
-        An MPS is a LINE, so wire order = cost. Every step-k gate couples
-        branch pair k to the position register, so we park the position
-        register in the middle of the branch pairs to halve the average
-        interaction distance.
-        """
-        n_pos = math.ceil(math.log2(2 * T + 1))
-        state = [f"s{i}" for i in range(2 * T)]
-        pos = [f"p{i}" for i in range(n_pos)]
-        cut = 2 * (T // 2)                  # split between two branch pairs
-        ordered = state[:cut] + pos + state[cut:]
-        return state, pos, ordered
-
-    # ------------------------------------------------------------------
-    # 3. Controlled +/-1 on the position register
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _shift(pos, sign, ctrl_wires, ctrl_vals):
-        """
-        Ripple increment/decrement, big-endian (pos[0] = MSB).
-        Written as MultiControlledX ladders rather than one dense
-        QubitUnitary: tensor-network devices choke on wide dense gates,
-        and MCX decomposes into 2-qubit gates the MPS can absorb.
-        """
-        n = len(pos)
-        order = range(n) if sign > 0 else reversed(range(n))
-        for i in order:
-            lower = list(pos[i + 1:])
-            ctrls = lower + list(ctrl_wires)
-            vals = [1] * len(lower) + list(ctrl_vals)
-            if ctrls:
-                qml.MultiControlledX(wires=ctrls + [pos[i]], control_values=vals)
-            else:
-                qml.PauliX(wires=pos[i])
-
-    # ------------------------------------------------------------------
-    # 4. Device
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _device(wires, backend, max_bond_dim, **kw):
-        if backend == "mps-gpu":            # cuTensorNet
-            return qml.device("lightning.tensor", wires=wires, method="mps",
-                              max_bond_dim=max_bond_dim, **kw)
-        if backend == "mps-cpu":            # quimb
-            return qml.device("default.tensor", wires=wires, method="mps",
-                              max_bond_dim=max_bond_dim, **kw)
-        if backend == "statevector":        # reference, small T only
-            return qml.device("default.qubit", wires=wires)
-        raise ValueError(f"unknown backend {backend!r}")
-
-    # ------------------------------------------------------------------
-    # 5. The circuit
-    # ------------------------------------------------------------------
-    def position_probs(self, T, backend="mps-cpu", max_bond_dim=None, **dev_kw):
+    def quantum_trinomial_state(self, T=3):
         angles = self.compute_step_angles(T)
-        state, pos, ordered = self._layout(T)
-        n_pos = len(pos)
 
-        if max_bond_dim is None:
-            max_bond_dim = 2 * T + 2        # >= 2T+1 => exact
+        num_state_qubits = 2 * T
+        num_pos_qubits = math.ceil(math.log2(2 * T + 1))
 
-        dev = self._device(ordered, backend, max_bond_dim, **dev_kw)
+        state_wires = [f"s{i}" for i in range(num_state_qubits)]
+        pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
+        all_wires = state_wires + pos_wires
+        
+        # --- NEW QISKIT MPS BACKEND ---
+        dev = qml.device("qiskit.aer", wires=all_wires, method="matrix_product_state")
 
+
+        # increases / decreases the position by 1 whether we are up / down / mid.
+        dim = 2 ** num_pos_qubits
+        U_inc = np.roll(np.eye(dim), 1, axis=0)
+        U_dec = np.roll(np.eye(dim), -1, axis=0)
+        
         @qml.qnode(dev)
         def circuit():
-            # offset the register so logical j = 0 sits at integer T
-            for idx, bit in enumerate(format(T, f"0{n_pos}b")):
-                if bit == "1":
-                    qml.PauliX(wires=pos[idx])
+            # prepare position register
+            binary_offset = format(T, f'0{num_pos_qubits}b')
+            for idx, bit in enumerate(binary_offset):
+                if bit == '1':
+                    qml.PauliX(wires=pos_wires[idx])
 
-            # first branch always happens at j = 0
-            t1, t2 = angles[0]
-            qml.RY(t1, wires=state[0])
-            qml.ctrl(qml.RY, control=[state[0]], control_values=[0])(t2, wires=state[1])
+            ############## STEP 1: INITIAL U rot ##########################
+            theta_1, theta_2 = angles[0]
+            qml.RY(theta_1, wires=state_wires[0])
+            qml.ctrl(qml.RY(theta_2, wires=state_wires[1]), control=state_wires[0], control_values=[0])
 
+            # Run the loop T times
             for step in range(1, T + 1):
-                # --- apply the jump that was just prepared ---
-                s0, s1 = state[2 * (step - 1)], state[2 * (step - 1) + 1]
-                self._shift(pos, -1, [s0, s1], [0, 0])   # |00> = down
-                self._shift(pos, +1, [s0, s1], [1, 0])   # |10> = up
-                #                                          |01> = mid = identity
+                ############## STEP 2: Update position ######################
+                prev_s0 = state_wires[2 * (step - 1)] 
+                prev_s1 = state_wires[2 * (step - 1) + 1] 
+                                
+                qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[0, 0])(
+                    U_dec, wires=pos_wires)
+                qml.ctrl(qml.QubitUnitary, control=[prev_s0, prev_s1], control_values=[1, 0])(
+                    U_inc, wires=pos_wires)
 
-                # --- prepare the next jump, conditioned on where we are ---
+                ############## STEP 3: Prepare Next U(j) ####################
                 if step < T:
-                    c0, c1 = state[2 * step], state[2 * step + 1]
+                    curr_s0 = state_wires[2 * step] 
+                    curr_s1 = state_wires[2 * step + 1] 
+                    
                     for j in range(-step, step + 1):
-                        t1, t2 = angles[j]
-                        bits = [int(b) for b in format(j + T, f"0{n_pos}b")]
-                        qml.ctrl(qml.RY, control=pos, control_values=bits)(t1, wires=c0)
-                        qml.ctrl(qml.RY, control=pos + [c0],
-                                 control_values=bits + [0])(t2, wires=c1)
+                        theta_1, theta_2 = angles[j] 
 
-            # NOTE: tensor-network devices don't implement qml.probs (a full
-            # probability vector isn't a natural MPS quantity). We ask for one
-            # basis-state projector per j instead -- 2T+1 cheap contractions of
-            # the same MPS, and it works on every backend.
-            out = []
-            for j in range(-T, T + 1):
-                bits = [int(b) for b in format(j + T, f"0{n_pos}b")]
-                proj = qml.prod(*[qml.Projector(np.array([b]), wires=w)
-                                  for b, w in zip(bits, pos)])
-                out.append(qml.expval(proj))
-            return tuple(out)
+                        pos_val = j + T 
+                        pos_bin = format(pos_val, f'0{num_pos_qubits}b')
+                        ctrl_vals = [int(b) for b in pos_bin]
 
-        probs = np.array(circuit(), dtype=float).ravel()
-        return np.arange(-T, T + 1), probs
+                        qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
+                            theta_1, wires=curr_s0)
 
-    # ------------------------------------------------------------------
-    # 6. Exact classical reference (sanity check the MPS truncation)
-    # ------------------------------------------------------------------
-    def classical_position_probs(self, T):
-        dist = {0: 1.0}
-        for _ in range(T):
-            nxt = {}
-            for j, p in dist.items():
-                pu, pm, pd = self._branch_probs(j)
-                nxt[j + 1] = nxt.get(j + 1, 0.0) + p * pu
-                nxt[j] = nxt.get(j, 0.0) + p * pm
-                nxt[j - 1] = nxt.get(j - 1, 0.0) + p * pd
-            dist = nxt
-        j_vals = np.arange(-T, T + 1)
-        return j_vals, np.array([dist.get(int(j), 0.0) for j in j_vals])
+                        combined_ctrl_wires = pos_wires + [curr_s0]
+                        combined_ctrl_vals = ctrl_vals + [0]
+                        qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
+                            theta_2, wires=curr_s1)
 
-    # ------------------------------------------------------------------
-    # 7. Plot
-    # ------------------------------------------------------------------
-    def plot_position_states(self, T, backend="mps-cpu", max_bond_dim=None,
-                             show_reference=True, savepath=None, **dev_kw):
-        j_vals, probs = self.position_probs(T, backend=backend,
-                                            max_bond_dim=max_bond_dim, **dev_kw)
+            # We can go right back to returning the exact probabilities we want!
+            return qml.probs(wires=state_wires), qml.probs(wires=pos_wires)
 
-        fig, ax = plt.subplots(figsize=(11, 5))
-        ax.bar(j_vals, probs, color="royalblue", edgecolor="black",
-               label=f"MPS ({backend})")
-
-        if show_reference:
-            _, ref = self.classical_position_probs(T)
-            ax.plot(j_vals, ref, "o--", color="darkorange", linewidth=1.5,
-                    markersize=5, label="exact classical")
-            err = np.max(np.abs(probs - ref))
-            ax.set_title(f"Position distribution (T={T})   max |MPS - exact| = {err:.2e}")
-        else:
-            ax.set_title(f"Position distribution (T={T})")
-
-        ax.set_xlabel("Final position j")
-        ax.set_ylabel("Probability")
-        ax.set_xticks(j_vals[:: max(1, len(j_vals) // 21)])
-        ax.grid(axis="y", linestyle="--", alpha=0.6)
-        ax.legend()
-
-        for j, p in zip(j_vals, probs):
-            if p > 0.005:
-                ax.text(j, p + 0.005, f"{p:.3f}", ha="center", fontsize=8)
-
+        # The QNode returns exactly the tuple of arrays you originally designed
+        return circuit()
+    
+    def plot_position_states(self, T):
+        # Unpack the second item in the tuple (position probabilities)
+        _, pos_probs = self.quantum_trinomial_state(T)
+        
+        # It's perfectly safe to calculate num_pos_qubits here again for scaling,
+        # but the logical position calculation depends on `T`.
+        j_values = []
+        j_probs = []
+        
+        # Loop through all possible states in the position register
+        for i, prob in enumerate(pos_probs):
+            # i is the physical integer (pos_val). 
+            # We subtract T to get the logical position (j)
+            j = i - T 
+            
+            # We only care about valid j positions between -T and T
+            if -T <= j <= T:
+                j_values.append(j)
+                j_probs.append(prob)
+                
+        plt.figure(figsize=(10, 5))
+        plt.bar(j_values, j_probs, color='royalblue', edgecolor='black')
+        plt.xlabel('Final Position (j)')
+        plt.ylabel('Probability')
+        plt.title(f'Aggregated Position Distribution (T={T})')
+        plt.xticks(range(-T, T + 1)) # Force x-axis to show all j integer ticks
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Add labels on top of the bars for clarity
+        for i, prob in enumerate(j_probs):
+            if prob > 0.001:
+                plt.text(j_values[i], prob + 0.01, f'{prob:.3f}', ha='center', va='bottom', fontsize=9)
+                
         plt.tight_layout()
-        if savepath:
-            plt.savefig(savepath, dpi=150)
-        return fig, ax
+        # plt.savefig('./figures/gpurun.png') # Commented to avoid FileNotFoundError
+        plt.show()
 
-
+# ==========================================
+# Execution Code
+# ==========================================
 if __name__ == "__main__":
-    bkm = BKTrinomialQuantum(k=0.0, var=0.1, dt=1.0)
-    bkm.plot_position_states(T=8, backend="mps-cpu", savepath="position_T8.png")
-    plt.show()
+    print("Initializing BlackKarasinskiModel...")
+    theta_val = 0.5 
+    bkm = BlackKarasinskiModel(k=0.0, theta=theta_val, var=0.1, dt=1)
+    
+    print("Running tensor network circuit for T=4. This may take a moment...")
+    bkm.plot_position_states(T=4)
