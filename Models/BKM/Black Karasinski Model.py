@@ -601,5 +601,5 @@ plt.show()
 #### TODO #####
 # (1) Change dt to smaller value e.g. dt = 0.5 with 2T steps comparedd to dt = 1 with T steps
 # (2) Compute classical distribution and compute divergence or wasserstein with true distribution
-# (3) Try different values of k(t)
+# (3) Try different values of k(t) and theta(t)
 # (4) Use Tensor netwokrs (need argument for why they don't work here)
