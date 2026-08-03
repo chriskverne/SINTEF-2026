@@ -1,4 +1,5 @@
 import math
+import json
 import numpy as np
 import pennylane as qml
 import matplotlib.pyplot as plt
@@ -6,53 +7,43 @@ from scipy.stats import norm, entropy, wasserstein_distance
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
-        self.k = k
-        self.theta = theta 
+        self.k = k # currently constant
+        self.theta = theta # currently constant
         self.var = var
         self.dt = dt
-
-    def analytical_variance(self, n_steps):
-        V = 0.0
-        fine_steps = max(1000, n_steps * 10)
-        dt_fine = (n_steps * self.dt) / fine_steps
-        
-        for i in range(fine_steps):
-            t = i * dt_fine
-            idx = int(t) 
-            k_val = self.k[min(idx, len(self.k) - 1)]
-            V += (-2 * k_val * V + self.var) * dt_fine
-            
-        return V
 
     def compute_step_angles(self, num_steps):
         angles = {}
         
-        for step in range(num_steps):
-            angles[step] = {}
-            t = step * self.dt
-            idx = int(t)
-            current_k = self.k[min(idx, len(self.k) - 1)]
+        # The maximum span of j after num_steps (where i goes up to num_steps - 1)
+        max_j = num_steps - 1
+        
+        for j in range(-max_j, max_j + 1):
+            a = -self.k * j * self.dt
             
-            for j in range(-step, step + 1):
-                a = -current_k * j * self.dt
-                
-                p_up = 1/6 + (a**2 + a) / 2
-                p_mid = 2/3 - a**2
-                p_down = 1/6 + (a**2 - a) / 2
+            # Calculate raw trinomial probabilities
+            p_up = 1/6 + (a**2 + a) / 2
+            p_mid = 2/3 - a**2
+            p_down = 1/6 + (a**2 - a) / 2
 
-                eps = 1e-8
-                p_up = max(p_up, eps)
-                p_mid = max(p_mid, eps)
-                p_down = max(p_down, eps)
-                total_p = p_up + p_mid + p_down
-                p_up /= total_p
-                p_mid /= total_p
-                p_down /= total_p
+            # Prevent negative probs:
+            eps = 1e-8
+            p_up = max(p_up, eps)
+            p_mid = max(p_mid, eps)
+            p_down = max(p_down, eps)
+            total_p = p_up + p_mid + p_down
+            p_up /= total_p
+            p_mid /= total_p
+            p_down /= total_p
 
-                theta_1 = 2 * np.arcsin(np.sqrt(p_up))
-                theta_2 = 2 * np.arcsin(np.sqrt(p_mid / (p_mid + p_down)))
+            # |00> = down, |01> = mid, |10> = up
+            # 1. Up or not up?
+            theta_1 = 2 * np.arcsin(np.sqrt(p_up))
+            # 2. Mid or down?
+            theta_2 = 2 * np.arcsin(np.sqrt(p_mid / (p_mid + p_down)))
 
-                angles[step][j] = (theta_1, theta_2)
+            # key is position 'j'
+            angles[j] = (theta_1, theta_2)
 
         return angles
    
@@ -66,53 +57,67 @@ class BlackKarasinskiModel:
         pos_wires = [f"p{i}" for i in range(num_pos_qubits)]
         all_wires = state_wires + pos_wires
         
+        # MUST use default.mixed to simulate non-unitary tracing/resets
         dev = qml.device("default.mixed", wires=all_wires)
 
+        # increases / decreases the position by 1 whether we are up / down / mid.
         dim = 2 ** num_pos_qubits
         U_inc = np.roll(np.eye(dim), 1, axis=0)
         U_dec = np.roll(np.eye(dim), -1, axis=0)
 
+        # Define Kraus operators for resetting a qubit to |0>
+        # K0 = |0><0|, K1 = |0><1|
         K0 = np.array([[1.0, 0.0], [0.0, 0.0]])
         K1 = np.array([[0.0, 1.0], [0.0, 0.0]])
         
         @qml.qnode(dev)
         def circuit():
+            # prepare position register
             binary_offset = format(T, f'0{num_pos_qubits}b')
             for idx, bit in enumerate(binary_offset):
                 if bit == '1':
                     qml.PauliX(wires=pos_wires[idx])
 
+            # Start the classical-like random walk loop
             for step in range(T):
                 
+                ############## STEP 1: Prepare U(j) ####################
                 if step == 0:
-                    theta_1, theta_2 = angles[0][0]
+                    theta_1, theta_2 = angles[0]
                     qml.RY(theta_1, wires=state_wires[0])
                     qml.ctrl(qml.RY, control=state_wires[0], control_values=[0])(
                         theta_2, wires=state_wires[1]
                     )
                 else:
                     for j in range(-step, step + 1):
-                        theta_1, theta_2 = angles[step][j] 
+                        theta_1, theta_2 = angles[j] 
 
                         pos_val = j + T 
                         pos_bin = format(pos_val, f'0{num_pos_qubits}b')
                         ctrl_vals = [int(b) for b in pos_bin]
 
+                        # Apply RY_1(j) if pos = j
                         qml.ctrl(qml.RY, control=pos_wires, control_values=ctrl_vals)(
                             theta_1, wires=state_wires[0])
 
+                        # Apply RY_2(j) if pos = j and s0 = 0
                         combined_ctrl_wires = pos_wires + [state_wires[0]]
                         combined_ctrl_vals = ctrl_vals + [0]
                         qml.ctrl(qml.RY, control=combined_ctrl_wires, control_values=combined_ctrl_vals)(
                             theta_2, wires=state_wires[1])
 
+                ############## STEP 2: Update position ######################
+                # IF |00> (Down): Decrement the position
                 qml.ctrl(qml.QubitUnitary, control=state_wires, control_values=[0, 0])(
                     U_dec, wires=pos_wires)
-                
+                # IF |01> (Mid): Do nothing (Identity)
+                # IF |10> (Up): Increment the position
                 qml.ctrl(qml.QubitUnitary, control=state_wires, control_values=[1, 0])(
                     U_inc, wires=pos_wires)
 
-                if step < T - 1:
+                ############## STEP 3: Reset State Qubits ####################
+                if step < T - 1: # skip reset on last step
+                    # Trace out the state qubit and force it back to pure |0>
                     qml.QubitChannel([K0, K1], wires=state_wires[0])
                     qml.QubitChannel([K0, K1], wires=state_wires[1])
 
@@ -121,75 +126,69 @@ class BlackKarasinskiModel:
         return circuit()
 
     def true_prob_dist(self, T):
-        current_time = T * self.dt
-        idx = int(current_time)
-        current_theta = self.theta[min(idx, len(self.theta) - 1)]
-
         dx = np.sqrt(self.var * 3 * self.dt)
         j_values = np.arange(-T, T + 1)
-        x_values = current_theta + j_values * dx
+        x_values = self.theta + j_values * dx
         
-        mean = current_theta
-        variance = self.analytical_variance(T)
+        t = T * self.dt
         
-        if variance > 0:
-            probs = norm.pdf(x_values, loc=mean, scale=np.sqrt(variance))
-            probs /= np.sum(probs)
+        if self.k == 0:
+            mean = self.theta
+            variance = self.var * t
         else:
-            probs = np.zeros_like(x_values)
-            probs[T] = 1.0 
-            
+            mean = self.theta
+            variance = (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
+        
+        probs = norm.pdf(x_values, loc=mean, scale=np.sqrt(variance))
+        probs /= np.sum(probs)
+        
         return x_values, probs
 
-    def divergence(self, target_time):
-        T = int(round(target_time / self.dt))
-        
-        if T == 0:
-            raise ValueError("Target time is too small for the given dt. T must be >= 1.")
-
+    def divergence(self, T):
+        # --- 1. DATA PREPARATION ---
         _, pos_probs = self.quantum_trinomial_state(T)
         
-        current_time = T * self.dt
-        idx = int(current_time)
-        current_theta = self.theta[min(idx, len(self.theta) - 1)]
-        current_k = self.k[min(idx, len(self.k) - 1)]
-
+        # Grid spacing and state space
         dx = np.sqrt(self.var * 3 * self.dt)
         j_values = np.arange(-T, T + 1)
+        x_values = self.theta + j_values * dx
         
-        x_values = current_theta + j_values * dx
-        
+        # Quantum probabilities
         q_probs = np.array([pos_probs[j + T] for j in j_values])
         q_probs = np.maximum(q_probs, 1e-12)
         q_probs /= np.sum(q_probs)
         
+        # Analytical discrete probabilities
         _, t_probs = self.true_prob_dist(T)
         t_probs = np.maximum(t_probs, 1e-12)
         t_probs /= np.sum(t_probs)
         
-        true_mean = current_theta
-        true_var = self.analytical_variance(T)
+        # Analytical continuous parameters
+        t = T * self.dt
+        true_mean = self.theta
+        true_var = self.var * t if self.k == 0 else (self.var / (2 * self.k)) * (1 - np.exp(-2 * self.k * t))
         
         x_dense = np.linspace(x_values[0], x_values[-1], 200)
+        pdf_dense = norm.pdf(x_dense, loc=true_mean, scale=np.sqrt(true_var)) * dx
         
-        if true_var > 0:
-            pdf_dense = norm.pdf(x_dense, loc=true_mean, scale=np.sqrt(true_var)) * dx
-        else:
-            pdf_dense = np.zeros_like(x_dense)
-        
+        # --- 2. MOMENT & DISTANCE CALCULATIONS ---
+        # Empirical moments from quantum distribution
         q_mean = float(np.sum(q_probs * x_values))
         q_var = float(np.sum(q_probs * ((x_values - q_mean) ** 2)))
         
+        # Absolute errors
         mean_err = abs(q_mean - true_mean)
         var_err = abs(q_var - true_var)
         
+        # Distance metrics
         kl_div = float(entropy(q_probs, t_probs))
         wass_dist = float(wasserstein_distance(x_values, x_values, q_probs, t_probs))
         fisher_rao = float(2 * np.arccos(np.clip(np.sum(np.sqrt(q_probs * t_probs)), 0.0, 1.0)))
         
+        # Structured metrics dictionary
         metrics = {
             "dt": self.dt,
-            "target_time": target_time,
+            "T": T,
             "kl_divergence": kl_div,
             "wasserstein_distance": wass_dist,
             "fisher_rao_distance": fisher_rao,
@@ -201,16 +200,19 @@ class BlackKarasinskiModel:
             "var_error": var_err
         }
 
+        # --- 3. PLOTTING INDIVIDUAL STEP ---
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         
+        # Left Panel: Distribution Comparison
         axes[0].bar(x_values, q_probs, width=dx * 0.8, color='royalblue', edgecolor='black', alpha=0.7, label='Quantum')
         axes[0].plot(x_dense, pdf_dense, color='red', linestyle='dashed', label='Continuous')
         axes[0].set_xlabel('State Variable (x = ln(r))')
         axes[0].set_ylabel('Probability')
-        axes[0].set_title(f'Distribution Comparison (t={target_time}, dt={self.dt})')
+        axes[0].set_title(f'Distribution Comparison (dt={self.dt}, T={T})')
         axes[0].legend()
         axes[0].grid(axis='y', linestyle='--', alpha=0.7)
         
+        # Right Panel: Text Metrics Summary
         axes[1].axis('off')
         summary_text = (
             f"--- Distance Metrics ---\n"
@@ -227,18 +229,40 @@ class BlackKarasinskiModel:
         axes[1].set_title('Metrics & Moments Summary', fontsize=14)
         
         plt.tight_layout()
-        # plt.show() 
-        plt.savefig(f'./figures/BKM_dt:{self.dt}_Time:{target_time}_nSteps:{T}_mean:{true_mean}_reversionRate:{current_k}.png')
+        plt.show() 
+        
         return metrics
 
-dt = 0.25
-k_array = [0.1, 0.1, 0.1, 0.1] 
-theta_array = [2.0, 7.0, 4.0, 5.0, 5.0] 
 
-bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
-metrics = bkm.divergence(target_time=0.5)
-metrics = bkm.divergence(target_time=1)
-metrics = bkm.divergence(target_time=2.0)
-metrics = bkm.divergence(target_time=3.0)
-metrics = bkm.divergence(target_time=4.0)
-metrics = bkm.divergence(target_time=5.0)
+T=15
+dt_configs = [1/T]
+T_configs = [T]
+
+results_history = []
+
+for dt, T in zip(dt_configs, T_configs):
+    # bkm = BlackKarasinskiModel(k=0.1294875987, theta=0.38957459012, var=0.1, dt=dt)
+    bkm = BlackKarasinskiModel(k=0.4213518413, theta=2.1324213213, var=0.1, dt=dt)
+
+    metrics = bkm.divergence(T=T)
+    results_history.append(metrics)
+
+
+    
+    # # Save step-by-step JSON
+    # json_data = {
+    #     "parameters": {
+    #         "dt": dt,
+    #         "T": T,
+    #         "k": bkm.k,
+    #         "theta": bkm.theta,
+    #         "var": bkm.var
+    #     },
+    #     "metrics": metrics
+    # }
+    
+    # file_path = f"./figures/dt={dt}_T={T}_k={bkm.k}.json"
+    # with open(file_path, "w") as f:
+    #     json.dump(json_data, f, indent=4)
+        
+    # print(f"Completed dt={dt}, T={T} -> Saved image & JSON.")
