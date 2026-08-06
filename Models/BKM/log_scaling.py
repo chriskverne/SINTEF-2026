@@ -4,6 +4,8 @@ import pennylane as qml
 import matplotlib.pyplot as plt
 from scipy.stats import norm, entropy, wasserstein_distance
 
+# from thrid_foruth_moment import circuit
+
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
         self.k = k
@@ -77,6 +79,7 @@ class BlackKarasinskiModel:
         
         @qml.qnode(dev)
         def circuit():
+            # position register initialization to |0> = -n_steps
             binary_offset = format(T, f'0{num_pos_qubits}b')
             for idx, bit in enumerate(binary_offset):
                 if bit == '1':
@@ -118,6 +121,20 @@ class BlackKarasinskiModel:
 
             return qml.probs(wires=state_wires), qml.probs(wires=pos_wires)
 
+
+        #### DRAW CIRCUIT ###
+        # print(f"\n--- Circuit Diagram for T={T} ---")
+        # print(qml.draw(circuit)())
+
+        print(f"\n--- Circuit Specs for T={T} ---")
+        specs = qml.specs(circuit)()
+        res = specs['resources']  
+        print(f"Total operations: {res.num_gates}")
+        print("Gate breakdown:")
+        for gate, count in res.gate_types.items():
+            print(f"  - {gate}: {count}")
+        print(f"Circuit Depth: {res.depth}")
+        print("==========================================\n")
         return circuit()
 
     def true_prob_dist(self, T):

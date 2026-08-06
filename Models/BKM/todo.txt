@@ -1,0 +1,5 @@
+1) gate count vs T
+2) wall speed vs T
+3) Accuracy vs bond dimension (how big bond dimension do we need?)
+
+Optional: Quantum Walks
