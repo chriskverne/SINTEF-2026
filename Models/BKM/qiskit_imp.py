@@ -45,8 +45,7 @@ from qiskit.circuit.library import RYGate
 from qiskit_aer import AerSimulator
 
 FIGDIR = "./figures"
-MAX_STATEVECTOR_QUBITS = 24   # above this, use uncapped MPS as the reference
-
+MAX_STATEVECTOR_QUBITS = 24 
 
 class BlackKarasinskiModel:
     def __init__(self, k, theta, var, dt):
@@ -375,6 +374,59 @@ class BlackKarasinskiModel:
         self._plot_study(rows, target_time, T, n_pos, show_chis)
         return rows
 
+    # ------------------------------------------------------------------
+    # the actual bond-dimension study
+    # ------------------------------------------------------------------
+    def bond_dimension_study(self, target_time, chis=(2, 4, 8, 10, 16, 32, 64),
+                             show_chis=None):
+        T = int(round(target_time / self.dt))
+        n_pos = math.ceil(math.log2(2 * T + 1))
+        n_qubits = 2 * T + n_pos
+        print(f"\n{'='*74}")
+        print(f"Bond-dimension study | t={target_time}  dt={self.dt}  T={T} steps")
+        print(f"  qubits: {2*T} coin (dilated resets) + {n_pos} position = {n_qubits}")
+        print(f"  theoretical exact bond dimension <= 2^{n_pos} = {2**n_pos}")
+        print(f"{'='*74}")
+
+        # --- exact reference -------------------------------------------------
+        if n_qubits <= MAX_STATEVECTOR_QUBITS:
+            ref, t_ref, _ = self.position_distribution(T, method="statevector")
+            ref_label = "statevector"
+        else:
+            ref, t_ref, _ = self.position_distribution(T, chi=None)
+            ref_label = "MPS (uncapped)"
+            
+        _, _, bond = self.position_distribution(T, chi=None, report_bond_dim=True)
+        print(f"reference: {ref_label} in {t_ref:.2f}s | "
+              f"max bond dim actually reached by exact MPS: {bond}")
+
+        rows = []
+        for chi in chis:
+            p, rt, _ = self.position_distribution(T, chi=chi)
+            m = self._metrics(T, target_time, p, chi=chi, ref_probs=ref)
+            m["runtime"] = rt
+            m["probs"] = p
+            rows.append(m)
+
+        m_ex = self._metrics(T, target_time, ref, chi=None, ref_probs=ref)
+        m_ex["runtime"] = t_ref
+        m_ex["probs"] = ref
+        m_ex["max_bond_reached"] = bond  # Explicitly store the actual max bond
+        rows.append(m_ex)
+
+        hdr = f"{'chi':>6} {'TV|exact':>11} {'KL|exact':>11} {'KL|normal':>11} " \
+              f"{'Wass|normal':>12} {'mean err':>10} {'var err':>10} {'t[s]':>7}"
+        print("\n" + hdr)
+        print("-" * len(hdr))
+        for m in rows:
+            c = "exact" if np.isinf(m["chi"]) else f"{int(m['chi'])}"
+            print(f"{c:>6} {m['tv_vs_exact']:11.3e} {m['kl_vs_exact']:11.3e} "
+                  f"{m['kl_divergence']:11.3e} {m['wasserstein_distance']:12.3e} "
+                  f"{m['mean_error']:10.3e} {m['var_error']:10.3e} {m['runtime']:7.2f}")
+
+        self._plot_study(rows, target_time, T, n_pos, show_chis)
+        return rows
+
     def _plot_study(self, rows, target_time, T, n_pos, show_chis):
         os.makedirs(FIGDIR, exist_ok=True)
         idx = int(T * self.dt)
@@ -387,64 +439,151 @@ class BlackKarasinskiModel:
 
         finite = [m for m in rows if np.isfinite(m["chi"])]
         exact = rows[-1]
-        chis = np.array([m["chi"] for m in finite])
+        chis = [int(m["chi"]) for m in finite]
+        actual_max_bond = exact.get("max_bond_reached", 2**n_pos)
 
+        # Fix duplicate chi values in display list
         if show_chis is None:
-            show_chis = [finite[0]["chi"], finite[len(finite) // 2]["chi"],
-                         finite[-1]["chi"]]
+            raw_chis = [finite[0]["chi"], finite[len(finite) // 2]["chi"], finite[-1]["chi"]]
+            show_chis = sorted(list(set([int(c) for c in raw_chis])))
 
-        fig, axes = plt.subplots(1, 3, figsize=(19, 5.2))
+        # Create a 2-panel figure with linear scale
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
-        # (a) distributions
-        ax = axes[0]
-        ax.plot(x_dense, pdf_dense, "k--", lw=2, label="continuous (analytic)")
-        ax.plot(x_values, exact["probs"], "o-", color="black", lw=2.2,
-                ms=5, label=r"exact ($\chi=\infty$)")
-        cmap = plt.cm.viridis(np.linspace(0, 0.85, len(show_chis)))
+        # ------------------------------------------------------------------
+        # Panel 1: Position Distributions
+        # ------------------------------------------------------------------
+        ax1 = axes[0]
+        ax1.plot(x_dense, pdf_dense, "k--", lw=2, label="Continuous (Analytic)")
+        ax1.plot(x_values, exact["probs"], "o-", color="black", lw=2.2, ms=5, 
+                 label=rf"Exact Quantum ($\chi_{{max}}={actual_max_bond}$)")
+        
+        cmap = plt.cm.viridis(np.linspace(0.1, 0.85, len(show_chis)))
         for c, col in zip(show_chis, cmap):
-            m = next(r for r in finite if r["chi"] == c)
-            ax.plot(x_values, m["probs"], "s--", color=col, ms=4,
-                    label=rf"$\chi={int(c)}$")
-        ax.set_xlabel("x = ln r"); ax.set_ylabel("probability")
-        ax.set_title(f"Position distribution (t={target_time}, T={T} steps)")
-        ax.legend(fontsize=9); ax.grid(ls="--", alpha=0.5)
+            m = next(r for r in finite if int(r["chi"]) == c)
+            ax1.plot(x_values, m["probs"], "s--", color=col, ms=4, label=rf"MPS $\chi={c}$")
 
-        # (b) truncation error vs chi
-        ax = axes[1]
-        ax.loglog(chis, [m["tv_vs_exact"] for m in finite], "o-", label="total variation")
-        ax.loglog(chis, [max(m["kl_vs_exact"], 1e-16) for m in finite], "s-", label="KL")
-        ax.loglog(chis, [max(m["fisher_rao_vs_exact"], 1e-16) for m in finite],
-                  "^-", label="Fisher-Rao")
-        ax.axvline(2 ** n_pos, color="red", ls=":", lw=2,
-                   label=rf"$2^{{n_{{pos}}}}={2**n_pos}$")
-        ax.set_xlabel(r"bond dimension $\chi$")
-        ax.set_ylabel("distance to exact quantum result")
-        ax.set_title("MPS truncation error")
-        ax.legend(fontsize=9); ax.grid(which="both", ls="--", alpha=0.5)
+        ax1.set_xlabel("x = ln r", fontsize=11)
+        ax1.set_ylabel("Probability", fontsize=11)
+        ax1.set_title(f"Position Distribution (t={target_time}, T={T} steps)", fontsize=12)
+        ax1.legend(fontsize=9, loc="upper right")
+        ax1.grid(True, ls="--", alpha=0.5)
 
-        # (c) accuracy vs the analytic model
-        ax = axes[2]
-        ax.semilogx(chis, [m["kl_divergence"] for m in finite], "o-", label="KL vs normal")
-        ax.semilogx(chis, [m["wasserstein_distance"] for m in finite], "s-",
-                    label="Wasserstein vs normal")
-        ax.semilogx(chis, [m["fisher_rao_distance"] for m in finite], "^-",
-                    label="Fisher-Rao vs normal")
-        ax.axhline(exact["kl_divergence"], color="C0", ls=":", alpha=0.8)
-        ax.axhline(exact["wasserstein_distance"], color="C1", ls=":", alpha=0.8)
-        ax.axhline(exact["fisher_rao_distance"], color="C2", ls=":", alpha=0.8)
-        ax.set_yscale("log")
-        ax.set_xlabel(r"bond dimension $\chi$")
-        ax.set_ylabel("distance to continuous model")
-        ax.set_title("Model accuracy (dotted = exact-circuit floor)")
-        ax.legend(fontsize=9); ax.grid(which="both", ls="--", alpha=0.5)
+        # ------------------------------------------------------------------
+        # Panel 2: Error Metrics vs Bond Dimension (Linear Scale)
+        # ------------------------------------------------------------------
+        ax2 = axes[1]
+        
+        kl_vals = [m["kl_divergence"] for m in finite]
+        wass_vals = [m["wasserstein_distance"] for m in finite]
+        fr_vals = [m["fisher_rao_distance"] for m in finite]
+
+        ax2.plot(chis, kl_vals, "o-", color="C0", lw=1.8, ms=6, label="KL Divergence")
+        ax2.plot(chis, wass_vals, "s-", color="C1", lw=1.8, ms=6, label="Wasserstein Distance")
+        ax2.plot(chis, fr_vals, "^-", color="C2", lw=1.8, ms=6, label="Fisher-Rao Distance")
+
+        # Exact quantum baselines
+        ax2.axhline(exact["kl_divergence"], color="C0", ls=":", lw=1.5, alpha=0.6, label="KL (Exact floor)")
+        ax2.axhline(exact["wasserstein_distance"], color="C1", ls=":", lw=1.5, alpha=0.6, label="Wasserstein (Exact floor)")
+        ax2.axhline(exact["fisher_rao_distance"], color="C2", ls=":", lw=1.5, alpha=0.6, label="Fisher-Rao (Exact floor)")
+
+        # Exact quantum points plotted at the actual maximum bond dimension
+        ax2.plot([actual_max_bond], [exact["kl_divergence"]], "o", color="C0", ms=8)
+        ax2.plot([actual_max_bond], [exact["wasserstein_distance"]], "s", color="C1", ms=8)
+        ax2.plot([actual_max_bond], [exact["fisher_rao_distance"]], "^", color="C2", ms=8)
+
+        # Vertical line for observed max bond dimension
+        ax2.axvline(actual_max_bond, color="red", ls="--", lw=1.5, label=f"Max Bond Reached ({actual_max_bond})")
+
+        ax2.set_xlabel(r"Bond Dimension $\chi$", fontsize=11)
+        ax2.set_ylabel("Distance to Continuous Model", fontsize=11)
+        ax2.set_title("Model Metrics Convergence vs Bond Dimension", fontsize=12)
+        ax2.legend(fontsize=8.5, loc="upper right")
+        ax2.grid(True, ls="--", alpha=0.5)
 
         plt.tight_layout()
         out = f"{FIGDIR}/BKM_bonddim_t{target_time}_dt{self.dt}.png"
         plt.savefig(out, dpi=130)
         plt.close(fig)
-        print(f"\nsaved -> {out}")
+        print(f"\nSaved updated study plot -> {out}")
 
+    def bond_dimension_scaling_study(self, max_T=20):
+        """
+        Evaluates and plots how the exact maximum bond dimension scales 
+        with the number of steps T and target time t.
+        """
+        T_values = list(range(1, max_T + 1))
+        actual_bonds = []
 
+        print(f"\n{'='*60}")
+        print(f"Tracking Exact Bond Dimension Scaling up to T={max_T}")
+        print(f"{'='*60}")
+        print(f"{'T':>4} | {'t':>5} | {'n_pos':>5} | {'Total Qubits':>12} | {'Actual Max Bond':>15}")
+        print("-" * 60)
+
+        for T in T_values:
+            t = T * self.dt
+            n_pos = math.ceil(math.log2(2 * T + 1))
+            n_qubits = 2 * T + n_pos
+            
+            # Force MPS method to guarantee we get a bond dimension report
+            _, _, bond = self.position_distribution(
+                T, chi=None, method="matrix_product_state", report_bond_dim=True
+            )
+            actual_bonds.append(bond)
+            
+            print(f"{T:4d} | {t:5.2f} | {n_pos:5d} | {n_qubits:12d} | {bond:15d}")
+
+        # ------------------------------------------------------------------
+        # Plotting the Scaling
+        # ------------------------------------------------------------------
+        os.makedirs(FIGDIR, exist_ok=True)
+        fig, ax1 = plt.subplots(figsize=(9, 5.5))
+        
+        ax1.plot(T_values, actual_bonds, 'o-', color='royalblue', lw=2, ms=6, label="Actual Max Bond Dimension (Qiskit MPS)")
+        
+        ax1.set_xlabel("Number of Steps (T)", fontsize=11)
+        ax1.set_ylabel(r"Maximum Bond Dimension $\chi$", fontsize=11)
+        ax1.set_title("Exact MPS Bond Dimension Scaling vs Circuit Depth", fontsize=13)
+        ax1.grid(True, ls="--", alpha=0.6)
+        ax1.legend(fontsize=10, loc="upper left")
+        
+        # Add secondary X-axis on top to show the target time 't'
+        ax2 = ax1.twiny()
+        ax2.set_xlim(ax1.get_xlim())
+        # Map the T ticks to time t ticks
+        ax2.set_xticks(ax1.get_xticks())
+        ax2.set_xticklabels([f"{tick * self.dt:.1f}" for tick in ax1.get_xticks()])
+        ax2.set_xlabel("Target Time (t)", fontsize=11)
+        
+        plt.tight_layout()
+        out = f"{FIGDIR}/BKM_bond_scaling_maxT{max_T}.png"
+        plt.savefig(out, dpi=130)
+        plt.close(fig)
+        print(f"\nSaved scaling plot -> {out}")
+        
+        return T_values, actual_bonds
+
+    def gate_count_study(self, max_T=10):
+        print(f"\n{'='*85}")
+        print(f"Gate Count Scaling Study up to T={max_T}")
+        print(f"{'='*85}")
+        print(f"{'T':>4} | {'Total Qubits':>12} | {'Raw Gates':>10} | {'Depth':>6} | "
+              f"{'X':>5} | {'RY':>4} | {'Ctrl-X':>8} | {'Ctrl-RY':>7}")
+        print("-" * 85)
+        for T in range(1, max_T + 1):
+            qc, _ = self.build_circuit(T)
+            n_qubits = qc.num_qubits
+            gate_count = qc.size()
+            depth = qc.depth()
+            ops = qc.count_ops()
+            x_count = ops.get('x', 0)
+            ry_count = ops.get('ry', 0)
+            ctrl_x = sum(v for k, v in ops.items() if k in ['cx', 'ccx', 'mcx'] or (k.startswith('c') and k.endswith('x')))
+            ctrl_ry = sum(v for k, v in ops.items() if 'ry' in k and k != 'ry')
+            print(f"{T:4d} | {n_qubits:12d} | {gate_count:10d} | {depth:6d} | "
+                  f"{x_count:5d} | {ry_count:4d} | {ctrl_x:8d} | {ctrl_ry:7d}")
+                        
 if __name__ == "__main__":
     dt = 0.25
     k_array = [0.1, 0.1, 0.1, 0.1]
@@ -453,11 +592,11 @@ if __name__ == "__main__":
     bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
 
     # your original single call still works, now with an optional chi
-    bkm.divergence(target_time=0.5, chi=4)
+    # bkm.divergence(target_time=0.5, chi=4)
 
     # the bond-dimension sweep
-    bkm.bond_dimension_study(target_time=0.5, chis=[1, 2, 3, 4, 6, 8, 10, 16, 32])
-    bkm.bond_dimension_study(target_time=1.0, chis=[2, 4, 8, 10, 16, 32, 64])
     bkm.bond_dimension_study(target_time=2.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])
-    bkm.bond_dimension_study(target_time=3.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])
-    bkm.bond_dimension_study(target_time=4.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])
+
+    # bkm.bond_dimension_scaling_study(max_T=15)
+    # scales as Bdim(T) = 4T - 2
+    # bkm.gate_count_study(max_T=20)

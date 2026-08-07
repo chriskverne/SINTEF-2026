@@ -3,6 +3,8 @@ import numpy as np
 import pennylane as qml
 import matplotlib.pyplot as plt
 from scipy.stats import norm, entropy, wasserstein_distance
+import os
+import json
 
 # from thrid_foruth_moment import circuit
 
@@ -126,15 +128,15 @@ class BlackKarasinskiModel:
         # print(f"\n--- Circuit Diagram for T={T} ---")
         # print(qml.draw(circuit)())
 
-        print(f"\n--- Circuit Specs for T={T} ---")
-        specs = qml.specs(circuit)()
-        res = specs['resources']  
-        print(f"Total operations: {res.num_gates}")
-        print("Gate breakdown:")
-        for gate, count in res.gate_types.items():
-            print(f"  - {gate}: {count}")
-        print(f"Circuit Depth: {res.depth}")
-        print("==========================================\n")
+        # print(f"\n--- Circuit Specs for T={T} ---")
+        # specs = qml.specs(circuit)()
+        # res = specs['resources']  
+        # print(f"Total operations: {res.num_gates}")
+        # print("Gate breakdown:")
+        # for gate, count in res.gate_types.items():
+        #     print(f"  - {gate}: {count}")
+        # print(f"Circuit Depth: {res.depth}")
+        # print("==========================================\n")
         return circuit()
 
     def true_prob_dist(self, T):
@@ -215,8 +217,16 @@ class BlackKarasinskiModel:
             "mean_error": mean_err,
             "quantum_var": q_var,
             "true_var": true_var,
-            "var_error": var_err
+            "var_error": var_err,
+            "x_values": x_values.tolist(),
+            "quantum_probs": q_probs.tolist(),
+            "x_dense": x_dense.tolist(),   
+            "pdf_dense": pdf_dense.tolist() 
         }
+
+        json_filename = f'./figures/metrics_dt{self.dt}_time{target_time}.json'
+        with open(json_filename, 'w') as json_file:
+            json.dump(metrics, json_file, indent=4)
 
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         
@@ -248,14 +258,20 @@ class BlackKarasinskiModel:
         plt.savefig(f'./figures/BKM_dt:{self.dt}_Time:{target_time}_nSteps:{T}_mean:{true_mean}_reversionRate:{current_k}.png')
         return metrics
 
-dt = 0.25
+dt = [1, 1/2, 1/4, 1/8,1/16, 1/32]
 k_array = [0.1, 0.1, 0.1, 0.1] 
 theta_array = [2.0, 7.0, 4.0, 5.0, 5.0] 
 
-bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
-metrics = bkm.divergence(target_time=0.5)
-metrics = bkm.divergence(target_time=1)
-metrics = bkm.divergence(target_time=2.0)
-metrics = bkm.divergence(target_time=3.0)
-metrics = bkm.divergence(target_time=4.0)
-metrics = bkm.divergence(target_time=5.0)
+
+for i in dt:
+    bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=i)
+    metrics = bkm.divergence(target_time=1)
+
+
+
+
+# metrics = bkm.divergence(target_time=0.5)
+# metrics = bkm.divergence(target_time=2.0)
+# metrics = bkm.divergence(target_time=3.0)
+# metrics = bkm.divergence(target_time=4.0)
+# metrics = bkm.divergence(target_time=5.0)
