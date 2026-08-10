@@ -1,28 +1,13 @@
 """
-Black-Karasinski quantum trinomial tree, simulated with Matrix Product States
+Black-Karasinski quantum trinomial tree, simulated with Matrix Product States (and without)
 (Qiskit Aer `matrix_product_state`) at a sweep of bond dimensions chi.
 
 Key idea
 --------
-The original PennyLane circuit runs on `default.mixed` because it applies a
-reset channel {K0 = |0><0|, K1 = |0><1|} to the two "coin" qubits after every
-step.  Tensor-network simulators want a *pure* state, so we use the Stinespring
-dilation of that channel:
-
-    reset(q)  ==  discard q, bring in a fresh |0> qubit
-
-i.e. instead of resetting the coin qubits at step t, we allocate a *fresh* pair
-of coin qubits for step t+1 and simply never touch the old ones again.  Tracing
-out the discarded ancillas gives exactly the same reduced density matrix on the
-position register, so the position distribution is mathematically identical to
-the density-matrix simulation (verified to ~1e-14).
-
-Qubit layout (this ordering matters a lot for MPS):
-
-    [coin_0 coin_0'] [coin_1 coin_1'] ... [coin_{T-1} coin_{T-1}'] [pos_0 ... pos_{n-1}]
-     <------------------- emitted in time order --------------->    <-- "bond" register
-
-This is the canonical *sequentially generated* MPS ordering: the position
+Qubit layout:
+[coin_0 coin_0'] [coin_1 coin_1'] ... [coin_{T-1} coin_{T-1}'] [pos_0 ... pos_{n-1}]
+<------------------- emitted in time order --------------->    <-- "bond" register
+This is the *sequentially generated* MPS ordering: the position
 register acts as the bond and each step emits two physical sites.  The exact
 Schmidt rank across any coin-coin cut is therefore bounded by 2^n_pos, i.e. by
 the number of tree nodes -- so the state is genuinely MPS-friendly and chi
@@ -34,9 +19,10 @@ Requirements:  pip install qiskit qiskit-aer numpy scipy matplotlib
 import os
 import math
 import time
+# from turtle import pos
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
+# import matplotlib
+# matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.stats import norm, entropy, wasserstein_distance
 
@@ -54,9 +40,6 @@ class BlackKarasinskiModel:
         self.var = var
         self.dt = dt
 
-    # ------------------------------------------------------------------
-    # classical / analytic pieces (unchanged from your original)
-    # ------------------------------------------------------------------
     def analytical_variance(self, n_steps):
         V = 0.0
         fine_steps = max(1000, n_steps * 10)
@@ -114,12 +97,9 @@ class BlackKarasinskiModel:
             probs[T] = 1.0
         return x_values, probs
 
-    # ------------------------------------------------------------------
-    # circuit construction (Qiskit, unitary dilation -> MPS friendly)
-    # ------------------------------------------------------------------
     @staticmethod
     def _controlled_increment(qc, ctrls, pos, sign):
-        """Modular +-1 on the little-endian register `pos`, controlled on `ctrls`."""
+        """Modular +-1 on the register `pos`, controlled on `ctrls`."""
         n = len(pos)
         if sign > 0:
             for i in range(n - 1, 0, -1):
@@ -187,8 +167,7 @@ class BlackKarasinskiModel:
     # ------------------------------------------------------------------
     def position_distribution(self, T, chi=None, method="matrix_product_state",
                               report_bond_dim=False, _cache={}):
-        """Marginal distribution of the position register.
-
+        """
         chi = None  -> no bond-dimension cap (exact, up to Aer's 1e-16 threshold)
         chi = int   -> truncate every SVD to at most `chi` singular values
         """
@@ -201,6 +180,8 @@ class BlackKarasinskiModel:
             probe = AerSimulator(method=method)
             # transpile once, reuse for every chi (transpilation is chi-independent)
             _cache[key] = (transpile(qc, probe, optimization_level=1), len(pos))
+
+
         tqc, n_pos = _cache[key]
 
         opts = {}
@@ -216,7 +197,7 @@ class BlackKarasinskiModel:
         data = result.data(0)
         probs = np.asarray(data["probabilities"], dtype=float)
         probs = np.maximum(probs, 0.0)
-        probs /= probs.sum()          # renormalise after truncation
+        probs /= probs.sum() # renormalise
 
         bond = None
         if report_bond_dim and "mps" in data:
@@ -225,9 +206,7 @@ class BlackKarasinskiModel:
 
         return probs[: 2 * T + 1], runtime, bond
 
-    # ------------------------------------------------------------------
-    # single-run metrics (drop-in replacement for your `divergence`)
-    # ------------------------------------------------------------------
+
     def divergence(self, target_time, chi=None, plot=True):
         T = int(round(target_time / self.dt))
         if T == 0:
@@ -276,7 +255,6 @@ class BlackKarasinskiModel:
             "var_error": abs(q_var - true_var),
         }
 
-        # truncation error: MPS(chi) vs the exact quantum distribution
         if ref_probs is not None:
             r = np.maximum(np.asarray(ref_probs, float), 1e-12)
             r /= r.sum()
@@ -323,59 +301,56 @@ class BlackKarasinskiModel:
         plt.savefig(f"{FIGDIR}/BKM_dt{self.dt}_t{target_time}_chi{chi}.png", dpi=130)
         plt.close(fig)
 
-    # ------------------------------------------------------------------
-    # the actual bond-dimension study
-    # ------------------------------------------------------------------
-    def bond_dimension_study(self, target_time, chis=(2, 4, 8, 10, 16, 32, 64),
-                             show_chis=None):
-        T = int(round(target_time / self.dt))
-        n_pos = math.ceil(math.log2(2 * T + 1))
-        n_qubits = 2 * T + n_pos
-        print(f"\n{'='*74}")
-        print(f"Bond-dimension study | t={target_time}  dt={self.dt}  T={T} steps")
-        print(f"  qubits: {2*T} coin (dilated resets) + {n_pos} position = {n_qubits}")
-        print(f"  theoretical exact bond dimension <= 2^{n_pos} = {2**n_pos}")
-        print(f"{'='*74}")
+    # # ------------------------------------------------------------------
+    # #  bond-dimension study
+    # # ------------------------------------------------------------------
+    # def bond_dimension_study(self, target_time, chis=(2, 4, 8, 10, 16, 32, 64),
+    #                          show_chis=None):
+    #     T = int(round(target_time / self.dt))
+    #     n_pos = math.ceil(math.log2(2 * T + 1))
+    #     n_qubits = 2 * T + n_pos
+    #     print(f"\n{'='*74}")
+    #     print(f"Bond-dimension study | t={target_time}  dt={self.dt}  T={T} steps")
+    #     print(f"  qubits: {2*T} coin (dilated resets) + {n_pos} position = {n_qubits}")
+    #     print(f"  theoretical exact bond dimension <= 2^{n_pos} = {2**n_pos}")
+    #     print(f"{'='*74}")
 
-        # --- exact reference -------------------------------------------------
-        if n_qubits <= MAX_STATEVECTOR_QUBITS:
-            ref, t_ref, _ = self.position_distribution(T, method="statevector")
-            ref_label = "statevector"
-        else:
-            ref, t_ref, _ = self.position_distribution(T, chi=None)
-            ref_label = "MPS (uncapped)"
-        _, _, bond = self.position_distribution(T, chi=None, report_bond_dim=True)
-        print(f"reference: {ref_label} in {t_ref:.2f}s | "
-              f"max bond dim actually reached by exact MPS: {bond}")
+    #     if n_qubits <= MAX_STATEVECTOR_QUBITS:
+    #         ref, t_ref, _ = self.position_distribution(T, method="statevector")
+    #         ref_label = "statevector"
+    #     else:
+    #         ref, t_ref, _ = self.position_distribution(T, chi=None)
+    #         ref_label = "MPS (uncapped)"
+    #     _, _, bond = self.position_distribution(T, chi=None, report_bond_dim=True)
+    #     print(f"reference: {ref_label} in {t_ref:.2f}s | "
+    #           f"max bond dim actually reached by exact MPS: {bond}")
 
-        rows = []
-        for chi in chis:
-            p, rt, _ = self.position_distribution(T, chi=chi)
-            m = self._metrics(T, target_time, p, chi=chi, ref_probs=ref)
-            m["runtime"] = rt
-            m["probs"] = p
-            rows.append(m)
+    #     rows = []
+    #     for chi in chis:
+    #         p, rt, _ = self.position_distribution(T, chi=chi)
+    #         m = self._metrics(T, target_time, p, chi=chi, ref_probs=ref)
+    #         m["runtime"] = rt
+    #         m["probs"] = p
+    #         rows.append(m)
 
-        m_ex = self._metrics(T, target_time, ref, chi=None, ref_probs=ref)
-        m_ex["runtime"] = t_ref
-        m_ex["probs"] = ref
-        rows.append(m_ex)
+    #     m_ex = self._metrics(T, target_time, ref, chi=None, ref_probs=ref)
+    #     m_ex["runtime"] = t_ref
+    #     m_ex["probs"] = ref
+    #     rows.append(m_ex)
 
-        hdr = f"{'chi':>6} {'TV|exact':>11} {'KL|exact':>11} {'KL|normal':>11} " \
-              f"{'Wass|normal':>12} {'mean err':>10} {'var err':>10} {'t[s]':>7}"
-        print("\n" + hdr)
-        print("-" * len(hdr))
-        for m in rows:
-            c = "exact" if np.isinf(m["chi"]) else f"{int(m['chi'])}"
-            print(f"{c:>6} {m['tv_vs_exact']:11.3e} {m['kl_vs_exact']:11.3e} "
-                  f"{m['kl_divergence']:11.3e} {m['wasserstein_distance']:12.3e} "
-                  f"{m['mean_error']:10.3e} {m['var_error']:10.3e} {m['runtime']:7.2f}")
+    #     hdr = f"{'chi':>6} {'TV|exact':>11} {'KL|exact':>11} {'KL|normal':>11} " \
+    #           f"{'Wass|normal':>12} {'mean err':>10} {'var err':>10} {'t[s]':>7}"
+    #     print("\n" + hdr)
+    #     print("-" * len(hdr))
+    #     for m in rows:
+    #         c = "exact" if np.isinf(m["chi"]) else f"{int(m['chi'])}"
+    #         print(f"{c:>6} {m['tv_vs_exact']:11.3e} {m['kl_vs_exact']:11.3e} "
+    #               f"{m['kl_divergence']:11.3e} {m['wasserstein_distance']:12.3e} "
+    #               f"{m['mean_error']:10.3e} {m['var_error']:10.3e} {m['runtime']:7.2f}")
 
-        self._plot_study(rows, target_time, T, n_pos, show_chis)
-        return rows
+    #     self._plot_study(rows, target_time, T, n_pos, show_chis)
+    #     return rows
 
-    # ------------------------------------------------------------------
-    # the actual bond-dimension study
     # ------------------------------------------------------------------
     def bond_dimension_study(self, target_time, chis=(2, 4, 8, 10, 16, 32, 64),
                              show_chis=None):
@@ -534,9 +509,6 @@ class BlackKarasinskiModel:
             
             print(f"{T:4d} | {t:5.2f} | {n_pos:5d} | {n_qubits:12d} | {bond:15d}")
 
-        # ------------------------------------------------------------------
-        # Plotting the Scaling
-        # ------------------------------------------------------------------
         os.makedirs(FIGDIR, exist_ok=True)
         fig, ax1 = plt.subplots(figsize=(9, 5.5))
         
@@ -586,16 +558,16 @@ class BlackKarasinskiModel:
                         
 if __name__ == "__main__":
     dt = 0.25
-    k_array = [0.1, 0.1, 0.1, 0.1]
-    theta_array = [2.0, 7.0, 4.0, 5.0, 5.0]
+    k_array = np.full(20, 0.1) #[0.1, 0.1, 0.1, 0.1]
+    theta_array = np.full(20, 2.0) #[2.0, 7.0, 4.0, 5.0, 5.0]
 
     bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
 
     # your original single call still works, now with an optional chi
-    # bkm.divergence(target_time=0.5, chi=4)
+    bkm.divergence(target_time=10, chi=5, plot=True)
 
     # the bond-dimension sweep
-    bkm.bond_dimension_study(target_time=2.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])
+    # bkm.bond_dimension_study(target_time=2.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])
 
     # bkm.bond_dimension_scaling_study(max_T=15)
     # scales as Bdim(T) = 4T - 2
