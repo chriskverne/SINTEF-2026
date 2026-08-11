@@ -17,6 +17,7 @@ Requirements: pip install qiskit qiskit-aer numpy scipy matplotlib
 import os
 import math
 import time
+import json
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -26,7 +27,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import RYGate
 from qiskit_aer import AerSimulator
 
-FIGDIR = "./figures"
+FIGDIR = "./bond_figures"
 
 
 def _aer_basis(method, _cache={}):
@@ -210,8 +211,8 @@ class BlackKarasinskiModel:
         if chi is not None:
             opts["matrix_product_state_max_bond_dimension"] = int(chi)
             opts["matrix_product_state_truncation_threshold"] = 1e-16
-        # sim = AerSimulator(method=method, **opts)
-        sim = AerSimulator(method=method, device="GPU", **opts)
+        sim = AerSimulator(method=method, **opts)
+        # sim = AerSimulator(method=method, device="GPU", **opts)
 
         t0 = time.time()
         result = sim.run(tqc, shots=1).result()
@@ -253,18 +254,29 @@ class BlackKarasinskiModel:
         q_var = float(np.sum(q_probs * (x_values - q_mean) ** 2))
 
         m = {
-            "chi": chi if chi is not None else np.inf,
+            "chi": chi, # Saved as null in JSON if chi is None
             "n_steps": T,
             "runtime": runtime,
             "kl": float(entropy(q_probs, t_probs)),
             "wass": float(wasserstein_distance(x_values, x_values, q_probs, t_probs)),
             "fr": float(2 * np.arccos(np.clip(np.sum(np.sqrt(q_probs * t_probs)), 0, 1))),
-            "q_mean": q_mean, "true_mean": true_mean, "mean_err": abs(q_mean - true_mean),
-            "q_var": q_var, "true_var": true_var, "var_err": abs(q_var - true_var),
+            "q_mean": q_mean, "true_mean": float(true_mean), "mean_err": abs(q_mean - true_mean),
+            "q_var": q_var, "true_var": float(true_var), "var_err": abs(q_var - true_var),
+            "dx": float(dx),
+            "x_values": x_values.tolist(),
+            "q_probs": q_probs.tolist(),
+            "t_probs": t_probs.tolist()
         }
 
-        # --- figure -----------------------------------------------------
         os.makedirs(FIGDIR, exist_ok=True)
+        
+        # Save dictionary to JSON for future replotting
+        json_out = f"{FIGDIR}/BKM_dt{self.dt}_t{target_time}_chi{chi}.json"
+        with open(json_out, "w") as f:
+            json.dump(m, f, indent=4)
+        print(f"Saved data -> {json_out}")
+
+        # --- figure -----------------------------------------------------
         x_dense = np.linspace(x_values[0], x_values[-1], 200)
         pdf_dense = (norm.pdf(x_dense, loc=true_mean, scale=np.sqrt(true_var)) * dx
                      if true_var > 0 else np.zeros_like(x_dense))
@@ -278,6 +290,9 @@ class BlackKarasinskiModel:
         axes[0].set_title(f"t={target_time}, dt={self.dt}, chi={chi}")
         axes[0].legend(); axes[0].grid(axis="y", ls="--", alpha=0.7)
 
+        # Print "Exact" in place of None for formatting if chi wasn't set
+        print_chi = chi if chi is not None else "Exact"
+
         axes[1].axis("off")
         axes[1].text(0.05, 0.5,
                      f"--- Distance Metrics ---\n"
@@ -290,6 +305,7 @@ class BlackKarasinskiModel:
                      f"Var Error:        {m['var_err']:.6f}\n"
                      f"  (Q: {m['q_var']:.4f} | True: {m['true_var']:.4f})\n\n"
                      f"--- Run ---\n"
+                     f"chi:              {print_chi}\n"
                      f"steps T:          {T}\n"
                      f"sim runtime:      {runtime:.2f} s",
                      ha="left", va="center", fontsize=11, family="monospace")
@@ -298,7 +314,7 @@ class BlackKarasinskiModel:
         out = f"{FIGDIR}/BKM_dt{self.dt}_t{target_time}_chi{chi}.png"
         plt.savefig(out, dpi=130)
         plt.show() if show else plt.close(fig)
-        print(f"Saved -> {out}")
+        print(f"Saved plot -> {out}")
         return m
 
 
@@ -309,5 +325,10 @@ if __name__ == "__main__":
 
     bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
 
-    m = bkm.plot(target_time=20, chi=12)
-    print(m)
+    target_time = 10
+    chi_values = [5, 10, 20, 30]  # None runs exact simulation
+
+    for chi in chi_values:
+        print(f"\n--- Running for chi = {chi} ---")
+        m = bkm.plot(target_time=target_time, chi=chi)
+        print(f"Finished chi = {chi}. KL Divergence: {m['kl']:.6f}")
