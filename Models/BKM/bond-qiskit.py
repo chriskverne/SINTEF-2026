@@ -317,18 +317,50 @@ class BlackKarasinskiModel:
         print(f"Saved plot -> {out}")
         return m
 
+    def gatgecount(self, max_t=20, method="matrix_product_state"):
+        print("\\begin{table}[h]")
+        print("\\centering")
+        print("\\begin{tabular}{r | r r r r r}")
+        print("T & Depth & Total Gates & CX & T / Tdg & Single-Qubit (U/P) \\\\")
+        print("\\hline")
+        
+        for T in range(1, max_t + 1):
+            qc, _ = self.build_circuit(T)
+            tqc = transpile(qc, basis_gates=_aer_basis(method), optimization_level=1)
+            ops = dict(tqc.count_ops())
+            
+            depth = tqc.depth()
+            total = sum(ops.values())
+            cx = ops.get('cx', 0)
+            
+            # Combine T and T-dagger as they represent non-Clifford cost
+            t_gates = ops.get('t', 0) + ops.get('tdg', 0)
+            
+            # Combine phase and general rotation gates
+            sq_rot = (ops.get('p', 0) + ops.get('u1', 0) + ops.get('u2', 0) + 
+                      ops.get('u3', 0) + ops.get('u', 0))
+            
+            print(f"{T} & {depth} & {total} & {cx} & {t_gates} & {sq_rot} \\\\")
+            
+        print("\\hline")
+        print("\\end{tabular}")
+        print("\\caption{Circuit metrics for Black-Karasinski tree scaling.}")
+        print("\\label{tab:gate_metrics}")
+        print("\\end{table}")
 
 if __name__ == "__main__":
-    dt = 0.25
+    dt = 1
     k_array = np.full(20, 0.1)
     theta_array = np.full(20, 2.0)
 
     bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
 
-    target_time = 10
-    chi_values = [5, 10, 20, 30]  # None runs exact simulation
+    target_time = 20#[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+    chi_values = [None]  # None runs exact simulation
+    # for target_time in target_times:
+    bkm.gatgecount(max_t=int(round(target_time / dt)))
 
-    for chi in chi_values:
-        print(f"\n--- Running for chi = {chi} ---")
-        m = bkm.plot(target_time=target_time, chi=chi)
-        print(f"Finished chi = {chi}. KL Divergence: {m['kl']:.6f}")
+    # for chi in chi_values:
+    #     print(f"\n--- Running for chi = {chi} ---")
+    #     m = bkm.plot(target_time=target_time, chi=chi)
+    #     print(f"Finished chi = {chi}. KL Divergence: {m['kl']:.6f}")

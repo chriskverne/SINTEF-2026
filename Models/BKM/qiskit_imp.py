@@ -564,7 +564,7 @@ if __name__ == "__main__":
     bkm = BlackKarasinskiModel(k=k_array, theta=theta_array, var=0.1, dt=dt)
 
     # your original single call still works, now with an optional chi
-    bkm.divergence(target_time=10, chi=5, plot=True)
+    bkm.divergence(target_time=5, chi=None, plot=True)
 
     # the bond-dimension sweep
     # bkm.bond_dimension_study(target_time=2.0, chis=[2, 4, 8, 10, 16, 32, 64, 128])

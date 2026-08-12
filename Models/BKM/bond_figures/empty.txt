@@ -1,0 +1,1 @@
+scp -r -i ~/New_H100.pem ubuntu@209.20.156.154:/home/ubuntu/Kongsberg/christopherkverne/SINTEF-2026/Models/BKM/bond_figures /Users/christopherkverne/Desktop/SINTEF-2026/Models/BKM/bond_figures 
