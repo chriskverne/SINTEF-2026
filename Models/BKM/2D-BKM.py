@@ -408,7 +408,7 @@ class BlackKarasinski2DModel:
         return kl_div
 
 if __name__ == "__main__":
-    dt_values = [1/4]#[1, 1/2]  # Keep it small to start, as 2D multiplexers are slow!
+    dt_values = [1, 1/2]  # Keep it small to start, as 2D multiplexers are slow!
     
     for dt in dt_values:
         print(f"\n--- Running evaluation for dt = {dt} ---")

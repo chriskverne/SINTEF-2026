@@ -22,8 +22,8 @@ for i, t in enumerate(t_vals):
     n_qubits = 2 * T + math.ceil(math.log2(2 * T + 1))
     
     for chi in chi_vals:
-        if (t == 60 and chi == 70):
-            continue
+        # if (t == 60 and chi == 70):
+        #     continue
 
         filepath = f'./bond_figures/BKM_dt0.25_t{t}_chi{chi}.json'
         
